@@ -17,7 +17,7 @@ namespace Malyuvach;
 
 public class Worker : BackgroundService
 {
-    const bool isDebug = true;
+    const bool isDebug = false;
     private readonly ILogger<Worker> _logger;
     private readonly MalyuvachOptions _options = new MalyuvachOptions();
     private readonly TelegramBotClient _botClient;
