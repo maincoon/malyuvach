@@ -90,8 +90,10 @@ public class Worker : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         // log some
+        _logger.LogInformation($"START: LLM - {_options.ModelName}");
         _logger.LogInformation($"START: SYSTEM prom path - {_options.MainSystemPromptPath}");
         _logger.LogInformation($"START: JSON validator path - {_options.JSONValidatorSystemPromptPath}");
+        _logger.LogInformation($"START: ComfyUI workflow - {_options.ImagePromptApiPath}");
 
         // rewind updates to not get offline messages
         if (_options.SkipUpdates)
@@ -266,8 +268,8 @@ public class Worker : BackgroundService
 
         // strip special characters like new lines and tabs
         answer = answer
-            .Replace("\n", "")
-            .Replace("\r", "")
+            .Replace("\n", " ")
+            .Replace("\r", " ")
             .Replace("\t", " ")
             .Replace("```json", "")
             .Replace("```", "")
@@ -352,12 +354,15 @@ public class Worker : BackgroundService
                 _logger.LogError($"ERROR: {response.StatusCode} - {responseString}");
                 return null;
             }
+
             // deserialize response
             var responseJson = JsonObject.Parse(responseString)!;
 
             // check if node with prompt_id is finished
             if (responseJson[promptId] != null && responseJson[promptId]!["outputs"] != null)
             {
+                _logger.LogDebug($"RESPONSE: {responseString}");
+
                 // TODO hardcoded output number
                 var outputFile = responseJson[promptId]!["outputs"]!["26"]!["images"]![0]![
                     "filename"
@@ -628,6 +633,7 @@ public class Worker : BackgroundService
             }
 
             // Save context to file
+            ClearContext(ollamaChat);
             SaveContext(ollamaChat, contextId);
 
             if (clientAnswer == null)
@@ -641,26 +647,24 @@ public class Worker : BackgroundService
                 );
                 return;
             }
-            else
-            {
-                ClearContext(ollamaChat);
-            }
 
             // check response text
-            if (clientAnswer!.text != null && string.IsNullOrEmpty(clientAnswer.prompt))
+            if (clientAnswer!.text != null &&
+                (string.IsNullOrEmpty(clientAnswer.prompt) || clientAnswer?.prompt?.Length < 10))
             {
                 // send text to chat
                 await botClient.SendTextMessageAsync(
                     chatId: chatId,
                     text: clientAnswer.text,
                     replyToMessageId: chatType == "group" ? messageId : null,
-                    cancellationToken: cancel
+                    cancellationToken: cancel,
+                    parseMode: ParseMode.Markdown
                 );
                 return;
             }
 
             // check response image
-            if (!string.IsNullOrEmpty(clientAnswer.prompt))
+            if (!string.IsNullOrEmpty(clientAnswer?.prompt))
             {
                 // send uploading image action
                 await botClient.SendChatActionAsync(chatId, ChatAction.UploadPhoto, cancel);
@@ -693,7 +697,8 @@ public class Worker : BackgroundService
                         caption,
                         replyToMessageId: chatType == "group" ? messageId : null,
                         replyMarkup: null,
-                        cancellationToken: cancel
+                        cancellationToken: cancel,
+                        parseMode: ParseMode.Markdown
                     );
 
                     // send image to showroom
