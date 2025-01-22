@@ -17,7 +17,6 @@ namespace Malyuvach;
 
 public class Worker : BackgroundService
 {
-    const bool isDebug = false;
     private readonly ILogger<Worker> _logger;
     private readonly MalyuvachOptions _options = new MalyuvachOptions();
     private readonly TelegramBotClient _botClient;
@@ -174,7 +173,7 @@ public class Worker : BackgroundService
             var contextJson = JsonSerializer.Serialize(chat.Messages, _jsonOptions.Value);
             System.IO.File.WriteAllText(contextPath, contextJson);
             // log some 
-            _logger.LogInformation($"CTX SAVED: {contextId} {chat.Messages.Count} messages");
+            _logger.LogDebug($"CTX SAVED: {contextId} {chat.Messages.Count} messages");
         }
         catch (Exception ex)
         {
@@ -200,7 +199,7 @@ public class Worker : BackgroundService
                 var messages = JsonSerializer.Deserialize<List<OllamaSharp.Models.Chat.Message>>(contextJson, _jsonOptions.Value);
                 ollamaChat.SetMessages(messages!);
                 // log some
-                _logger.LogInformation($"CTX LOADED: {contextId} {messages!.Count} messages");
+                _logger.LogDebug($"CTX LOADED: {contextId} {messages!.Count} messages");
             }
         }
         catch (Exception ex)
@@ -276,7 +275,7 @@ public class Worker : BackgroundService
             .Trim();
 
         // log some
-        _logger.LogDebug($"VALIDATOR: {answer}");
+        _logger.LogDebug($"VALIDATOR: raw {answer}");
 
         // parsing answer but without throwing exceptions
         try
@@ -295,6 +294,13 @@ public class Worker : BackgroundService
                 _logger.LogError("ERROR - null answer");
                 return null;
             }
+
+            // log some
+            if (_options.UseJSONValidator)
+            {
+                _logger.LogInformation($"VALIDATOR: {JsonSerializer.Serialize(result, _jsonOptions.Value)}");
+            }
+
             return result;
         }
         catch (Exception ex)
@@ -369,14 +375,17 @@ public class Worker : BackgroundService
                 ]!.ToString();
 
                 _logger.LogDebug($"PROMPT {promptId} FINISHED - {outputFile}");
+
                 // download image from comfyUIBaseURL/view?filename={outputFile}}&type=temp
                 using var imageResponse = await httpClient.GetAsync(
                     $"{_options.ComfyUIBaseUrl}/view?filename={outputFile}&type=temp"
                 );
+
                 // read image
                 var image = await imageResponse.Content.ReadAsByteArrayAsync();
+
                 // log some
-                _logger.LogDebug($"IMAGE: {promptId}, {image.Length} bytes");
+                _logger.LogInformation($"IMAGE: {promptId} {outputFile} {image.Length} bytes");
                 return image!;
             }
             // wait some for retry
@@ -496,7 +505,7 @@ public class Worker : BackgroundService
         var promptId = responseJson!["prompt_id"]!.ToString();
 
         // log some
-        _logger.LogInformation($"PROMPT: {promptId}, {positivePrompt}");
+        _logger.LogDebug($"PROMPT: {promptId}, {positivePrompt}");
 
         // wait for prompt to be finished
         return await WaitForPromptImage(promptId);
@@ -543,8 +552,9 @@ public class Worker : BackgroundService
         var finalMessage = message.Text;
 
         // out message
-        _logger.LogInformation(
-            $"INPUT: {chatType} {message.From.Username} ({(ulong)chatId}): {message.Text}"
+        _logger.LogInformation(chatType == "private" ?
+                $"INPUT: {chatType} {message.From.Username}: {message.Text}" :
+                $"INPUT: {chatType} {message.From.Username}@{message.Chat.Title}: {message.Text}"
         );
 
         // compose context id for group chats
@@ -552,15 +562,6 @@ public class Worker : BackgroundService
             chatType == "group"
                 ? (((ulong)chatId).ToString() + ((ulong)userId).ToString())
                 : chatId.ToString();
-
-        // DEBUG
-        if (isDebug)
-            if (update.Message.From.Username != "maincoon")
-            {
-                // ignore messages from other users
-                _logger.LogDebug("IGNORED");
-                return;
-            }
 
         // for group chats parse first word as bot name using comma, colon, space as separators
         var guessBotName = message.Text.Split(
@@ -702,7 +703,7 @@ public class Worker : BackgroundService
                     );
 
                     // send image to showroom
-                    if (!string.IsNullOrEmpty(_options.BotShowRoomChannel) && !isDebug)
+                    if (!string.IsNullOrEmpty(_options.BotShowRoomChannel))
                     {
                         // trim caption to 1000 characters
                         caption = clientAnswer.prompt;
