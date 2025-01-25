@@ -22,7 +22,6 @@ public class Worker : BackgroundService
 
     private readonly TelegramBotClient _botClient;
     private readonly Random _random = new Random();
-    private readonly Dictionary<string, OllamaSharp.Chat> Chats = new();
     private readonly IOptions<JsonSerializerOptions> _jsonOptions;
 
     /// <summary>
@@ -195,7 +194,7 @@ public class Worker : BackgroundService
         }
     }
 
-    private OllamaSharp.Chat CreateContext(string contextId)
+    private OllamaSharp.Chat LoadContext(string contextId)
     {
         // create client
         var ollamaClient = new OllamaApiClient(new Uri(_options.OllamaUIBaseUrl));
@@ -220,6 +219,10 @@ public class Worker : BackgroundService
         {
             _logger.LogError(ex, $"ERROR: loading context {contextId} - using default empty");
         }
+
+        // update system prompt
+        UpdateSystemPrompt(ollamaChat);
+
         return ollamaChat;
     }
 
@@ -228,6 +231,10 @@ public class Worker : BackgroundService
     /// </summary>
     private void FixContext(OllamaSharp.Chat chat, int messages)
     {
+        if (messages <= 0)
+        {
+            return;
+        }
         var messagesCopy = chat.Messages.ToList();
         if (messagesCopy.Count > messages)
         {
@@ -325,13 +332,17 @@ public class Worker : BackgroundService
     }
 
     private async Task<ClientAnswer?> GetClientAnswer(
-        OllamaSharp.Chat chat,
+        OllamaSharp.Chat context,
         string message,
         CancellationToken cancel
     )
     {
+        // remember context
+        var ctxSize = context.Messages.Count;
+
         // sending request and specifying context size
-        var response = chat.Send(message);
+        var response = context.Send(message);
+
         // asking model for answer and collecting it to one string
         var answer = "";
         await foreach (var answerToken in response)
@@ -339,15 +350,20 @@ public class Worker : BackgroundService
 
         // log some
         answer = answer.Trim();
-        _logger.LogInformation($"ANSWER: {answer}");
+        _logger.LogInformation($"ANSWER ({_options.ModelName}): {answer}");
 
         // validating JSON
         var result = await ValidateJSON(answer, cancel);
-        if (result != null)
+        if (result == null)
         {
-            // replace message to get more consistent results
-            chat.Messages.Last().Content = JsonSerializer.Serialize(result, _jsonOptions.Value);
+            // fix context according to previous size
+            FixContext(context, context.Messages.Count - ctxSize);
         }
+
+        // replace message to get more consistent results
+        context.Messages.Last().Content = JsonSerializer.Serialize(result, _jsonOptions.Value);
+
+        // return result
         return result;
     }
 
@@ -436,6 +452,9 @@ public class Worker : BackgroundService
         objValue[keys[^1]] = JsonSerializer.SerializeToNode(value, _jsonOptions.Value);
     }
 
+    /// <summary>
+    /// Same as SetJsonObjectValue, but for multiple keys.
+    /// </summary>
     void SetJsonObjectValue<T>(JsonNode? objValue, IEnumerable<string> keys, T value)
     {
         if (objValue == null)
@@ -526,7 +545,7 @@ public class Worker : BackgroundService
             return null;
         }
 
-        // deserialize response "{"prompt_id": "4255cbd3-3d8b-4986-b535-e68b40e85da1", "number": 5, "node_errors": {}}"
+        // deserialize response
         var responseJson = JsonObject.Parse(responseString);
         var promptId = responseJson!["prompt_id"]!.ToString();
 
@@ -623,22 +642,15 @@ public class Worker : BackgroundService
             }
         }
 
-        // finding or creating new chat
-        if (!Chats.TryGetValue(contextId, out var ollamaChat))
-        {
-            ollamaChat = CreateContext(contextId);
-            Chats.Add(contextId, ollamaChat);
-        }
-
-        // update system prompt
-        UpdateSystemPrompt(ollamaChat);
-
         try
         {
-            // log context and size
+            // loading context
+            var context = LoadContext(contextId);
+
+            // log context and size (average token length is 4)
             _logger.LogDebug(
-                $"CTX: {contextId} {ollamaChat.Messages.Count}/{_options.MaxContextMsgs} msg "
-                    + $"{ollamaChat.Messages.Sum(m => m.Content?.Split(' ').Length) * 4}/{_options.MaxContextSize} tok"
+                $"CTX: {contextId} {context.Messages.Count}/{_options.MaxContextMsgs} msg "
+                + $"{context.Messages.Sum(m => m.Content?.Split(' ').Length) * 4}/{_options.MaxContextSize} tok"
             );
 
             // get client answer with max retries
@@ -650,18 +662,16 @@ public class Worker : BackgroundService
                 // send typing action
                 await botClient.SendChatActionAsync(chatId, ChatAction.Typing, cancel);
                 // get client answer
-                clientAnswer = await GetClientAnswer(ollamaChat, finalMessage, cancel);
+                clientAnswer = await GetClientAnswer(context, finalMessage, cancel);
                 if (clientAnswer == null)
                 {
                     _logger.LogWarning($"RETRY: {contextId} {_options.MaxAnswerRetries - retries}");
-                    // fix context
-                    FixContext(ollamaChat, 1);
                 }
             }
 
             // Save context to file
-            ClearContext(ollamaChat);
-            SaveContext(ollamaChat, contextId);
+            ClearContext(context);
+            SaveContext(context, contextId);
 
             if (clientAnswer == null)
             {
@@ -749,8 +759,7 @@ public class Worker : BackgroundService
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, $"Bot HandleUpdateAsync error");
-            FixContext(ollamaChat, 2);
+            _logger.LogError(ex, $"Bot HandleUpdateAsync error, context {contextId} not saved");
             try
             {
                 await botClient.SendTextMessageAsync(
