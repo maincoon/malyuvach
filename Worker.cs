@@ -358,6 +358,7 @@ public class Worker : BackgroundService
         {
             // fix context according to previous size
             FixContext(context, context.Messages.Count - ctxSize);
+            return null;
         }
 
         // replace message to get more consistent results
@@ -663,7 +664,7 @@ public class Worker : BackgroundService
                 await botClient.SendChatActionAsync(chatId, ChatAction.Typing, cancel);
                 // get client answer
                 clientAnswer = await GetClientAnswer(context, finalMessage, cancel);
-                if (clientAnswer == null)
+                if (clientAnswer == null && retries > 0)
                 {
                     _logger.LogWarning($"RETRY: {contextId} {_options.MaxAnswerRetries - retries}");
                 }
