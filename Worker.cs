@@ -12,13 +12,14 @@ using Telegram.Bot.Exceptions;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 using Telegram.Bot.Types.InputFiles;
-
 namespace Malyuvach;
 
 public class Worker : BackgroundService
 {
     private readonly ILogger<Worker> _logger;
-    private readonly MalyuvachOptions _options = new MalyuvachOptions();
+    private MalyuvachOptions _options = new MalyuvachOptions();
+    private readonly IOptionsMonitor<MalyuvachOptions> _optionsMonitor;
+
     private readonly TelegramBotClient _botClient;
     private readonly Random _random = new Random();
     private readonly Dictionary<string, OllamaSharp.Chat> Chats = new();
@@ -78,21 +79,34 @@ public class Worker : BackgroundService
         }
     }
 
-    public Worker(ILogger<Worker> logger, IConfiguration configuration, IOptions<JsonSerializerOptions> jsonOptions)
+    public Worker(ILogger<Worker> logger, IOptionsMonitor<MalyuvachOptions> options, IOptions<JsonSerializerOptions> jsonOptions)
     {
-        configuration.GetSection(MalyuvachOptions.Section).Bind(_options);
+        _optionsMonitor = options;
+        _options = _optionsMonitor.CurrentValue;
+        _optionsMonitor.OnChange((newOptions) =>
+        {
+            _options = newOptions;
+            StartLogging();
+        });
         _jsonOptions = jsonOptions;
         _logger = logger;
         _botClient = new TelegramBotClient(_options.BotKey);
     }
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    protected void StartLogging()
     {
         // log some
         _logger.LogInformation($"START: LLM - {_options.ModelName}");
         _logger.LogInformation($"START: SYSTEM prom path - {_options.MainSystemPromptPath}");
         _logger.LogInformation($"START: JSON validator path - {_options.JSONValidatorSystemPromptPath}");
-        _logger.LogInformation($"START: ComfyUI workflow - {_options.ImagePromptApiPath}");
+        _logger.LogInformation($"START: ComfyUI workflow - {_options.Workflow.ComfyUIWorkflowPath}");
+        _logger.LogInformation($"START: ---------------------------------------------------");
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        // log some
+        StartLogging();
 
         // rewind updates to not get offline messages
         if (_options.SkipUpdates)
@@ -369,10 +383,10 @@ public class Worker : BackgroundService
             {
                 _logger.LogDebug($"RESPONSE: {responseString}");
 
-                // TODO hardcoded output number
-                var outputFile = responseJson[promptId]!["outputs"]!["26"]!["images"]![0]![
-                    "filename"
-                ]!.ToString();
+                // get output result
+                var outputFile = responseJson[promptId]!["outputs"]!
+                    [_options.Workflow.OutputNodeId]!
+                    ["images"]![0]!["filename"]!.ToString();
 
                 _logger.LogDebug($"PROMPT {promptId} FINISHED - {outputFile}");
 
@@ -422,6 +436,18 @@ public class Worker : BackgroundService
         objValue[keys[^1]] = JsonSerializer.SerializeToNode(value, _jsonOptions.Value);
     }
 
+    void SetJsonObjectValue<T>(JsonNode? objValue, IEnumerable<string> keys, T value)
+    {
+        if (objValue == null)
+        {
+            return;
+        }
+        foreach (var k in keys)
+        {
+            SetJsonObjectValue(objValue, k, value);
+        }
+    }
+
     private async Task<byte[]?> CreateImageAsync(
         string positivePrompt,
         string negativePrompt,
@@ -431,50 +457,50 @@ public class Worker : BackgroundService
     )
     {
         // load prompt api as JToken
-        var promptApiText = System.IO.File.ReadAllText(_options.ImagePromptApiPath);
+        var promptApiText = System.IO.File.ReadAllText(_options.Workflow.ComfyUIWorkflowPath);
         var promptApiJson = JsonNode.Parse(promptApiText)!;
 
         // set prompt text
-        SetJsonObjectValue(promptApiJson, "6.inputs.text", positivePrompt);
+        SetJsonObjectValue(promptApiJson, _options.Workflow.PositivePromptFieldId, positivePrompt);
         // set negative prompt text
-        SetJsonObjectValue(promptApiJson, "7.inputs.text", negativePrompt ?? "");
+        SetJsonObjectValue(promptApiJson, _options.Workflow.NegativePromptFieldId, negativePrompt ?? "");
         // set image type and dimensions
         switch (orientation)
         {
             case "landscape":
                 SetJsonObjectValue(
                     promptApiJson,
-                    "5.inputs.width",
+                    _options.Workflow.ImageWidthFieldId,
                     _options.ImageDefaultXDimension
                 );
                 SetJsonObjectValue(
                     promptApiJson,
-                    "5.inputs.height",
+                    _options.Workflow.ImageHeightFieldId,
                     _options.ImageDefaultYDimension
                 );
                 break;
             case "portrait":
                 SetJsonObjectValue(
                     promptApiJson,
-                    "5.inputs.width",
+                    _options.Workflow.ImageWidthFieldId,
                     _options.ImageDefaultYDimension
                 );
                 SetJsonObjectValue(
                     promptApiJson,
-                    "5.inputs.height",
+                    _options.Workflow.ImageHeightFieldId,
                     _options.ImageDefaultXDimension
                 );
                 break;
             default:
-                SetJsonObjectValue(promptApiJson, "5.inputs.width", 1024);
-                SetJsonObjectValue(promptApiJson, "5.inputs.height", 1024);
+                SetJsonObjectValue(promptApiJson, _options.Workflow.ImageWidthFieldId, 1024);
+                SetJsonObjectValue(promptApiJson, _options.Workflow.ImageHeightFieldId, 1024);
                 break;
         }
 
         // create random seed
-        SetJsonObjectValue(promptApiJson, "25.inputs.noise_seed", seed);
+        SetJsonObjectValue(promptApiJson, _options.Workflow.NoiseSeedFieldId, seed);
         // set steps
-        SetJsonObjectValue(promptApiJson, "17.inputs.steps", steps);
+        SetJsonObjectValue(promptApiJson, _options.Workflow.StepsFieldId, steps);
 
         // create final object
         var promptApiRoot = new { prompt = promptApiJson };
@@ -553,8 +579,8 @@ public class Worker : BackgroundService
 
         // out message
         _logger.LogInformation(chatType == "private" ?
-                $"INPUT: {chatType} {message.From.Username}: {message.Text}" :
-                $"INPUT: {chatType} {message.From.Username}@{message.Chat.Title}: {message.Text}"
+            $"INPUT: {chatType} {message.From.Username}({(ulong)message.From.Id}): {message.Text}" :
+            $"INPUT: {chatType} {message.From.Username}({(ulong)message.From.Id})@{message.Chat.Title}({(ulong)message.Chat.Id}): {message.Text}"
         );
 
         // compose context id for group chats
