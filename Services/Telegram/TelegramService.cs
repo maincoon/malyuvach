@@ -91,11 +91,13 @@ public class TelegramService : ITelegramService
                     messageText);
             }
 
-            // Check if message contains bot mention or is in private chat
+            // Check if message is a reply to bot or contains bot mention or is in private chat
             var isBotMentioned = _settings.BotNames.Any(name =>
                 messageText.Contains(name, StringComparison.OrdinalIgnoreCase));
 
-            if (!isBotMentioned && update.Message.Chat.Type != ChatType.Private)
+            var isReplyToBot = update.Message.ReplyToMessage?.From?.Username == "Malyuvach_bot";
+
+            if (!isBotMentioned && !isReplyToBot && update.Message.Chat.Type != ChatType.Private)
             {
                 _logger.LogDebug("IGNORED");
                 return;

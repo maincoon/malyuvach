@@ -28,7 +28,7 @@
     </Content>
   </ItemGroup>
   <ItemGroup>
-    <None Include="ORIGINAL/Worker.cs" />
-    <Compile Remove="ORIGINAL/Worker.cs" />
+    <None Include="ORIGINAL/*" />
+    <Compile Remove="ORIGINAL/*" />
   </ItemGroup>
 </Project>

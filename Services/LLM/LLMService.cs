@@ -78,7 +78,7 @@ public class LLMService : ILLMService
                 }
 
                 answer = answer.Trim();
-                _logger.LogDebug("Answer ({Model}): {Answer}", _settings.ModelName, answer);
+                _logger.LogDebug("ANSWER ({Model}): {Answer}", _settings.ModelName, answer);
 
                 var result = await ValidateJSONAsync(answer, cancellationToken);
                 if (result == null)
@@ -171,7 +171,8 @@ public class LLMService : ILLMService
             .Replace("```", "")
             .Trim();
 
-        _logger.LogDebug("Validator raw response: {Answer}", answer);
+        _logger.LogDebug("Validator raw response t={Temperature}: {Answer}",
+            _settings.JSONValidatorTemperature, answer);
 
         try
         {
@@ -245,7 +246,8 @@ public class LLMService : ILLMService
                 chat.Messages.Clear();
                 chat.Messages.AddRange(messages!);
 
-                _logger.LogDebug("Context loaded: {ContextId} ({Count} messages)", contextId, messages!.Count);
+                _logger.LogDebug("Context loaded: {ContextId} ({Count} messages) t={Temperature}",
+                    contextId, messages!.Count, _settings.DialogTemperature);
             }
         }
         catch (Exception ex)
