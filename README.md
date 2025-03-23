@@ -1,85 +1,117 @@
 # malyuvach
 
-Telegram AI drawing bot in short.
+Telegram AI drawing bot that combines LLM for prompt generation with ComfyUI for image creation. The bot uses LLM to understand user requests and generate appropriate prompts for image generation.
 
 ## Requirements
 
-* Requires dotnet 8.
-* Requires [ollama API](https://ollama.com/)
-* Requires [ComfyUI API](https://comfyui.com/)
+* .NET 8 SDK
+* [Ollama](https://ollama.com/) for LLM functionality (default port: 11434)
+* [ComfyUI](https://github.com/comfyanonymous/ComfyUI) for image generation (default port: 8188)
 
+### Hardware Requirements
+
+* For Gemma 2B model: ~4GB VRAM
+* For Pixelwave Flux workflow: ~24GB VRAM (for default 1200x800 resolution)
 
 ## Installation
 
-One must clone GIT repository, build project using dotnet CLI and publish it:
+Clone the repository and build the project:
 
 ```bash
 git clone https://github.com/maincoon/malyuvach.git
 cd malyuvach
-dotnet publish -c Release -o release Malyuvach.csproj
+dotnet build
+dotnet publish -c Release -o release
 ```
 
-Copy `appsettings.json` and overwrite settings in `appsettings.Production.json` to match your environment. One may use **DOTNET_USE_POLLING_FILE_WATCHER** environment variable to fix issues with file watching on some systems.
+Copy configuration files and start the application:
 
 ```bash
-$ cp appsettings.json release/
-$ cd release
-$ export DOTNET_USE_POLLING_FILE_WATCHER=1
-$ ./Malyuvach
+cp appsettings.json release/
+cd release
+export DOTNET_USE_POLLING_FILE_WATCHER=1
+./Malyuvach
 ```
 
-## Usage
+## Configuration
 
-One must have registered Telegram bot and its token. One can get it from [BotFather](https://core.telegram.org/bots#botfather).
+The application uses the following configuration hierarchy:
 
-One must create `appsettings.Production.json` file in the root of the project with all the necessary settings using template from `appsettings.json`.
+1. `appsettings.json` - base configuration template
+2. `appsettings.Development.json` - for development environment
+3. `appsettings.Production.json` - for production environment
 
-For development purposes one can use `appsettings.Development.json` file.
+### Required Configuration
 
-## Choose the models
+Create `appsettings.Production.json` with the following essential settings:
 
-One can choose LLM and ComfyUI drawing workflow trough it's API depending on ones GPU and the desired quality of the drawing. To use new ComfyUI workflows one must update appsettings.json with the new workflow path and field ids in **Workflows** section.
+```json
+{
+  "Malyuvach": {
+    "LLM": {
+      "OllamaUIBaseUrl": "http://127.0.0.1:11434"
+    },
+    "Image": {
+      "ComfyUIBaseUrl": "http://127.0.0.1:8188"
+    },
+    "Telegram": {
+      "BotKey": "YOUR_BOT_TOKEN",
+      "BotNames": ["YOUR_BOT_NAME"],
+      "BotShowRoomChannel": "OPTIONAL_CHANNEL_ID"
+    }
+  }
+}
+```
 
-Any ComfyUI workflow can be adapted as long as it contains nodes with fields that have the following purposes:
+### Telegram Bot Setup
 
-* **PositivePromptFieldId** - text field for positive prompt
-* **NegativePromptFieldId** - text field for negative prompt
-* **ImageWidthFieldId** - width of the image to generate
-* **ImageHeightFieldId** - height of the image to generate
-* **NoiseSeedFieldId** - seed for noise generation
-* **StepsFieldId** - number of steps in diffusion process (very dependent on model)
-* **OutputNodeId** - *Image preview* node id where output image is generated
+1. Create a new bot through [BotFather](https://core.telegram.org/bots#botfather)
+2. Get the bot token and add it to your configuration
+3. Optionally set up a showcase channel where the bot will post generated images
 
-Sample workflow JSON:
+## System Prompts
+
+The bot uses two types of system prompts located in the `workflow` directory:
+
+* `system-prompt.md` - main prompt for user interaction and image prompt generation
+* `system-prompt-json-validator.md` - optional JSON validator prompt (can be disabled in settings)
+
+User conversation contexts are stored in the `contexts` directory (configurable through settings).
+
+## ComfyUI Workflow Configuration
+
+The bot supports custom ComfyUI workflows. Configure workflow node IDs in the settings:
 
 ```json
 "Workflow": {
     "ComfyUIWorkflowPath": "workflow/workflow_api-flux-schnell.json",
-    "PositivePromptFieldId": [
-        "6.inputs.text"
-    ],
-    "NegativePromptFieldId": [
-        "7.inputs.text"
-    ],
-    "ImageWidthFieldId": [
-        "5.inputs.width"
-    ],
-    "ImageHeightFieldId": [
-        "5.inputs.height"
-    ],
-    "NoiseSeedFieldId": [
-        "25.inputs.noise_seed"
-    ],
-    "StepsFieldId": [
-        "17.inputs.steps"
-    ],
+    "PositivePromptFieldId": ["6.inputs.text"],
+    "NegativePromptFieldId": ["7.inputs.text"],
+    "ImageWidthFieldId": ["5.inputs.width"],
+    "ImageHeightFieldId": ["5.inputs.height"],
+    "NoiseSeedFieldId": ["25.inputs.noise_seed"],
+    "StepsFieldId": ["17.inputs.steps"],
     "OutputNodeId": "26"
 }
 ```
 
-Provided sample workflow with ```gemma2:latest``` and ```Pixelwave_flux1_schnell_Q6_K_M_03``` models requires about **24GB** VRAM.
+Any ComfyUI workflow can be used as long as it provides nodes with these field purposes:
 
+* Positive prompt input
+* Negative prompt input
+* Image dimensions (width/height)
+* Noise seed for randomization
+* Steps count for the diffusion process
+* Output node for the final image
 
-## System prompts
+The default configuration uses Gemma 2B for LLM and Pixelwave Flux workflow for image generation, requiring approximately 24GB VRAM for default image resolution (1200x800).
 
-System prompts were created with GPT assistance. One can use provided prompts or create new ones. Depending on the LLM quality JSON validator may be disabled.
+## Architecture
+
+The application consists of three main services:
+
+* LLM Service - handles communication with Ollama API for text generation
+* Image Service - manages ComfyUI workflow execution and image generation
+* Telegram Service - provides bot interface and user interaction
+
+Each service has its own configuration section in appsettings.json for easy customization.
