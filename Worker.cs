@@ -169,7 +169,8 @@ public class Worker : BackgroundService
         var systemMessage = new OllamaSharp.Models.Chat.Message(ChatRole.System, _systemPrompt);
         var messagesCopy = chat.Messages.ToList();
         messagesCopy[0] = systemMessage;
-        chat.SetMessages(messagesCopy);
+        chat.Messages.Clear();
+        chat.Messages.AddRange(messagesCopy);
     }
 
     private void SaveContext(OllamaSharp.Chat chat, string contextId)
@@ -210,7 +211,8 @@ public class Worker : BackgroundService
                 // read context from file
                 var contextJson = System.IO.File.ReadAllText(contextPath);
                 var messages = JsonSerializer.Deserialize<List<OllamaSharp.Models.Chat.Message>>(contextJson, _jsonOptions.Value);
-                ollamaChat.SetMessages(messages!);
+                ollamaChat.Messages.Clear();
+                ollamaChat.Messages.AddRange(messages!);
                 // log some
                 _logger.LogDebug($"CTX LOADED: {contextId} {messages!.Count} messages");
             }
@@ -238,7 +240,8 @@ public class Worker : BackgroundService
         var messagesCopy = chat.Messages.ToList();
         if (messagesCopy.Count > messages)
         {
-            chat.SetMessages(messagesCopy.GetRange(0, messagesCopy.Count - messages));
+            chat.Messages.Clear();
+            chat.Messages.AddRange(messagesCopy.GetRange(0, messagesCopy.Count - messages));
         }
     }
 
@@ -254,7 +257,8 @@ public class Worker : BackgroundService
             {
                 messagesCopy.RemoveAt(1);
             }
-            chat.SetMessages(messagesCopy);
+            chat.Messages.Clear();
+            chat.Messages.AddRange(messagesCopy);
         }
     }
 
@@ -275,7 +279,7 @@ public class Worker : BackgroundService
             validator.Options = new RequestOptions { NumCtx = 8192 };
 
             // sending request and specifying context size
-            var response = validator.Send(message);
+            var response = validator.SendAsync(message, cancel);
 
             // asking model for answer and collecting it to one string
             await foreach (var answerToken in response)
@@ -340,8 +344,9 @@ public class Worker : BackgroundService
         // remember context
         var ctxSize = context.Messages.Count;
 
+
         // sending request and specifying context size
-        var response = context.Send(message);
+        var response = context.SendAsAsync(ChatRole.User, message, cancel);
 
         // asking model for answer and collecting it to one string
         var answer = "";
