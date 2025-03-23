@@ -7,22 +7,28 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UserSecretsId>dotnet-Malyuvach-1b20200d-f519-4fea-b4ae-4537967c8128</UserSecretsId>
     <EnableDefaultContentItems>false</EnableDefaultContentItems>
+    <LangVersion>12</LangVersion>
+    <NoWarn>CS9057</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Extensions.Hosting" Version="6.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.0" />
     <PackageReference Include="OllamaSharp" Version="5.1.7" />
     <PackageReference Include="Serilog.Extensions.Hosting" Version="9.0.0" />
     <PackageReference Include="Serilog.Settings.Configuration" Version="9.0.0" />
     <PackageReference Include="Serilog.Sinks.Console" Version="6.0.0" />
-    <PackageReference Include="Telegram.Bot" Version="18.0.0" />
-    <PackageReference Include="Serilog.AspNetCore" Version="2.0.0" />
-    <PackageReference Include="Serilog.Sinks.File" Version="2.0.0" />
+    <PackageReference Include="Telegram.Bot" Version="19.0.0" />
+    <PackageReference Include="Serilog.AspNetCore" Version="8.0.1" />
+    <PackageReference Include="Serilog.Sinks.File" Version="5.0.0" />
   </ItemGroup>
 
   <ItemGroup>
     <Content Include="workflow/*.*">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Content>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="ORIGINAL/Worker.cs" />
+    <Compile Remove="ORIGINAL/Worker.cs" />
   </ItemGroup>
 </Project>

@@ -1,28 +1,30 @@
-using System.Text.Json;
 using System.Text.Encodings.Web;
-using Malyuvach;
+using System.Text.Json;
 using System.Text.Unicode;
+using Malyuvach.Configuration;
+using Malyuvach.Services;
+using Malyuvach.Services.Image;
+using Malyuvach.Services.LLM;
+using Malyuvach.Services.Telegram;
+using Microsoft.Extensions.DependencyInjection;
 using Serilog;
 
-
-var host = Host.CreateDefaultBuilder(args).
-    UseSerilog((context, services, configuration) =>
+var host = Host.CreateDefaultBuilder(args)
+    .UseSerilog((context, services, configuration) =>
     {
         configuration.ReadFrom.Configuration(context.Configuration);
-    }).
-    ConfigureAppConfiguration((context, config) =>
+    })
+    .ConfigureAppConfiguration((context, config) =>
     {
         config.AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
         config.AddJsonFile($"appsettings.{context.HostingEnvironment.EnvironmentName}.json", optional: true, reloadOnChange: true);
     })
     .ConfigureServices((hostContext, services) =>
     {
-        var section = hostContext.Configuration.GetSection("Malyuvach");
-        services.Configure<MalyuvachOptions>(section);
-        services.AddHostedService<Worker>();
-    }).
-    ConfigureServices((hostContext, services) =>
-    {
+        // Configure settings
+        services.AddAppSettings(hostContext.Configuration);
+
+        // Configure JSON serialization
         services.Configure<JsonSerializerOptions>(options =>
         {
             options.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
@@ -31,6 +33,15 @@ var host = Host.CreateDefaultBuilder(args).
             options.AllowTrailingCommas = true;
             options.Encoder = JavaScriptEncoder.Create(UnicodeRanges.BasicLatin, UnicodeRanges.Cyrillic);
         });
+
+        // Register services
+        services.AddTransient<HttpClient>();
+        services.AddSingleton<ILLMService, LLMService>();
+        services.AddSingleton<IImageService, ImageService>();
+        services.AddSingleton<ITelegramService, TelegramService>();
+
+        // Configure hosted service
+        services.AddHostedService<BotWorker>();
     })
     .Build();
 
