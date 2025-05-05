@@ -332,13 +332,18 @@ public class TelegramService : ITelegramService
                 // Send to showroom if configured
                 if (!string.IsNullOrEmpty(_settings.BotShowRoomChannel))
                 {
+                    // limit caption to 1000 characters (Telegram limit)
+                    caption = answer.prompt;
+                    if (caption.Length > 1000)
+                    {
+                        caption = caption.Substring(0, 1000) + "...";
+                    }
                     _logger.LogInformation("OUTPUT: showroom -> [IMAGE] {Prompt}", answer.prompt);
                     imageStream.Seek(0, SeekOrigin.Begin);
                     await botClient.SendPhotoAsync(
                         chatId: _settings.BotShowRoomChannel,
                         photo: InputFile.FromStream(imageStream),
-                        caption: answer.prompt,
-                        parseMode: ParseMode.Markdown,
+                        caption: caption,
                         cancellationToken: cancellationToken);
                 }
             }
