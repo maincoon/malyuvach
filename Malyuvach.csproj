@@ -12,6 +12,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Concentus" Version="2.2.2" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.0" />
     <PackageReference Include="OllamaSharp" Version="5.1.7" />
     <PackageReference Include="Serilog.Extensions.Hosting" Version="9.0.0" />
@@ -20,6 +21,9 @@
     <PackageReference Include="Telegram.Bot" Version="19.0.0" />
     <PackageReference Include="Serilog.AspNetCore" Version="8.0.1" />
     <PackageReference Include="Serilog.Sinks.File" Version="5.0.0" />
+    <PackageReference Include="Whisper.net" Version="1.8.1" />
+    <PackageReference Include="Whisper.net.Runtime" Version="1.8.1" />
+    <PackageReference Include="Concentus.OggFile" Version="1.0.5" />
   </ItemGroup>
 
   <ItemGroup>

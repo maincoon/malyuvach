@@ -6,5 +6,4 @@ public class TelegramSettings
     public List<string> BotNames { get; set; } = new List<string>();
     public string BotKey { get; set; } = string.Empty;
     public bool SkipUpdates { get; set; }
-    public string STTConverterPath { get; set; } = string.Empty;
 }

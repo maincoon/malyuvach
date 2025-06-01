@@ -1,8 +1,8 @@
 using Malyuvach.Configuration;
 using Malyuvach.Services.Image;
 using Malyuvach.Services.LLM;
+using Malyuvach.Services.STT;
 using Microsoft.Extensions.Options;
-using System.Diagnostics;
 using Telegram.Bot;
 using Telegram.Bot.Exceptions;
 using Telegram.Bot.Types;
@@ -16,6 +16,7 @@ public class TelegramService : ITelegramService
     private readonly TelegramSettings _settings;
     private readonly ILLMService _llmService;
     private readonly IImageService _imageService;
+    private readonly ISTTService _sttService;
     private readonly TelegramBotClient _botClient;
     private readonly Random _random = new();
 
@@ -23,12 +24,14 @@ public class TelegramService : ITelegramService
         ILogger<TelegramService> logger,
         IOptions<TelegramSettings> settings,
         ILLMService llmService,
-        IImageService imageService)
+        IImageService imageService,
+        ISTTService sttService)
     {
         _logger = logger;
         _settings = settings.Value;
         _llmService = llmService;
         _imageService = imageService;
+        _sttService = sttService;
         _botClient = new TelegramBotClient(_settings.BotKey);
     }
 
@@ -134,70 +137,53 @@ public class TelegramService : ITelegramService
 
         try
         {
-            // Download the voice file
+            // Download the audio file
             var file = await botClient.GetFileAsync(fileId, cancellationToken);
-            var tempFilePath = Path.GetTempFileName() + ".mp3";
 
-            using (var fileStream = new FileStream(tempFilePath, FileMode.Create))
-            {
-                await botClient.DownloadFileAsync(file.FilePath!, fileStream, cancellationToken);
-            }
+            _logger.LogInformation("Processing audio message. File ID: {FileId}, Size: {Size} bytes",
+                fileId, file.FileSize);
 
-            _logger.LogInformation("Downloaded audio file to {TempFilePath}", tempFilePath);
+            // Download audio to memory stream and transcribe directly
+            using var audioStream = new MemoryStream();
+            await botClient.DownloadFileAsync(file.FilePath!, audioStream, cancellationToken);
+            audioStream.Position = 0; // Reset stream position for reading
 
-            // Convert speech to text
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = "python3",
-                Arguments = $"{_settings.STTConverterPath} -t \"{tempFilePath}\"",
-                RedirectStandardOutput = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-
-            var process = new Process { StartInfo = startInfo };
-            process.Start();
-
-            var transcribedText = await process.StandardOutput.ReadToEndAsync();
-            await process.WaitForExitAsync(cancellationToken);
-
-            // Clean up the temp file
-            try { System.IO.File.Delete(tempFilePath); } catch { /* ignore cleanup errors */ }
-
-            transcribedText = transcribedText.Trim();
-
+            // Transcribe audio using STT service
+            var transcribedText = await _sttService.TranscribeAsync(audioStream, cancellationToken);
 
             if (string.IsNullOrWhiteSpace(transcribedText))
             {
                 // If no text was extracted or transcription failed
+                var errorMessage = "Sorry, I couldn't understand your audio message. Please try sending it as text or in a different audio format.";
+                _logger.LogWarning("Audio transcription failed or returned empty result");
+
                 await botClient.SendTextMessageAsync(
                     chatId: chatId,
-                    text: "Sorry, I couldn't understand your french.",
+                    text: errorMessage,
                     replyToMessageId: messageId,
                     cancellationToken: cancellationToken);
                 return string.Empty;
             }
-            else
-            {
-                // Silently reply to original message tih transcribed text
-                await botClient.SendTextMessageAsync(
-                    chatId: chatId,
-                    text: transcribedText,
-                    replyToMessageId: messageId,
-                    cancellationToken: cancellationToken,
-                    disableNotification: true);
-            }
-            _logger.LogInformation("Transcribed audio: {Text}", transcribedText);
 
-            // done
+            // Send transcribed text as a silent reply to the original message
+            await botClient.SendTextMessageAsync(
+                chatId: chatId,
+                text: transcribedText,
+                replyToMessageId: messageId,
+                cancellationToken: cancellationToken,
+                disableNotification: true);
+
+            _logger.LogInformation("Audio transcribed successfully: {Text}", transcribedText);
             return transcribedText;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error processing audio file");
+            _logger.LogError(ex, "Error processing audio message");
+
+            var errorMessage = "Sorry, there was an error processing your audio message.";
             await botClient.SendTextMessageAsync(
                 chatId: chatId,
-                text: "Sorry, there was an error processing your audio message.",
+                text: errorMessage,
                 replyToMessageId: messageId,
                 cancellationToken: cancellationToken);
             return string.Empty;

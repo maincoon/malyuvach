@@ -9,6 +9,7 @@ public class AppSettings
     public ImageSettings Image { get; set; } = new();
     public LLMSettings LLM { get; set; } = new();
     public TelegramSettings Telegram { get; set; } = new();
+    public STTSettings STT { get; set; } = new();
 }
 
 public static class AppSettingsExtensions
@@ -20,6 +21,7 @@ public static class AppSettingsExtensions
         services.Configure<ImageSettings>(section.GetSection(nameof(AppSettings.Image)));
         services.Configure<LLMSettings>(section.GetSection(nameof(AppSettings.LLM)));
         services.Configure<TelegramSettings>(section.GetSection(nameof(AppSettings.Telegram)));
+        services.Configure<STTSettings>(section.GetSection(nameof(AppSettings.STT)));
 
         return services;
     }
