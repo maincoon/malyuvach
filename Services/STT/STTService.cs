@@ -89,7 +89,8 @@ public class STTService : ISTTService, IDisposable
     }
 
     /// <summary>
-    /// Transcribes audio stream to text using Whisper model
+    /// Transcribes audio stream to text using Whisper model.
+    /// Expects OGG/Opus format from Telegram voice messages.
     /// </summary>
     public async Task<string> TranscribeAsync(Stream audioStream, CancellationToken cancellationToken = default)
     {
@@ -110,78 +111,36 @@ public class STTService : ISTTService, IDisposable
         try
         {
             var stopwatch = Stopwatch.StartNew();
-            _logger.LogDebug("Starting audio transcription");
+            _logger.LogDebug("Audio OGG size: {Size} bytes", audioStream.Length);
 
-            // Reset stream position if possible
-            if (audioStream.CanSeek)
+            // Convert OGG/Opus to WAV format for Whisper.net
+            using var wavStream = await AudioConverter.ConvertOggOpusToWav(audioStream, cancellationToken);
+
+            // Process audio with Whisper
+            var transcriptionResult = new List<string>();
+            await foreach (var segment in _whisperProcessor.ProcessAsync(wavStream, cancellationToken))
             {
-                audioStream.Position = 0;
-            }
-
-            _logger.LogDebug("Audio stream loaded: {Size} bytes", audioStream.Length);
-
-            // Check if this is an OGG file by reading the first few bytes
-            var headerBytes = new byte[4];
-            await audioStream.ReadAsync(headerBytes, 0, 4, cancellationToken);
-            audioStream.Position = 0;
-
-            Stream processStream = audioStream;
-            MemoryStream? convertedStream = null;
-
-            // Check for OGG signature
-            if (headerBytes[0] == 0x4F && headerBytes[1] == 0x67 && headerBytes[2] == 0x67 && headerBytes[3] == 0x53) // "OggS"
-            {
-                _logger.LogDebug("Detected OGG format, converting to WAV using Concentus");
-                try
+                if (!string.IsNullOrWhiteSpace(segment.Text))
                 {
-                    convertedStream = await AudioConverter.ConvertOggOpusToWav(audioStream, cancellationToken);
-                    processStream = convertedStream;
-                    _logger.LogDebug("OGG to WAV conversion completed successfully");
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Failed to convert OGG to WAV using Concentus");
-                    return "Sorry, I couldn't process this audio format. Please try a different audio format.";
+                    transcriptionResult.Add(segment.Text.Trim());
                 }
             }
+            var fullTranscription = string.Join(" ", transcriptionResult).Trim();
 
-            try
+            // Log transcription result
+            stopwatch.Stop();
+            _logger.LogInformation(
+                "Audio transcription completed in {ElapsedMs}ms. Result length: {Length} characters",
+                stopwatch.ElapsedMilliseconds, fullTranscription.Length);
+
+            if (string.IsNullOrWhiteSpace(fullTranscription))
             {
-                // Process audio with Whisper directly from stream
-                var transcriptionResult = new List<string>();
-
-                await foreach (var segment in _whisperProcessor.ProcessAsync(processStream, cancellationToken))
-                {
-                    if (!string.IsNullOrWhiteSpace(segment.Text))
-                    {
-                        transcriptionResult.Add(segment.Text.Trim());
-                    }
-                }
-
-                var fullTranscription = string.Join(" ", transcriptionResult).Trim();
-
-                stopwatch.Stop();
-                _logger.LogInformation("Audio transcription completed in {ElapsedMs}ms. Result length: {Length} characters",
-                    stopwatch.ElapsedMilliseconds, fullTranscription.Length);
-
-                if (string.IsNullOrWhiteSpace(fullTranscription))
-                {
-                    _logger.LogWarning("Transcription result is empty");
-                    return string.Empty;
-                }
-
-                _logger.LogDebug("Transcription result: {Text}", fullTranscription);
-                return fullTranscription;
+                _logger.LogWarning("Transcription result is empty");
+                return string.Empty;
             }
-            finally
-            {
-                convertedStream?.Dispose();
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            _logger.LogInformation("Audio transcription was cancelled");
-            return string.Empty;
+
+            _logger.LogDebug("Transcription result: {Text}", fullTranscription);
+            return fullTranscription;
         }
         catch (Exception ex)
         {
@@ -194,8 +153,6 @@ public class STTService : ISTTService, IDisposable
         }
     }
 
-
-
     /// <summary>
     /// Dispose resources
     /// </summary>
@@ -203,8 +160,6 @@ public class STTService : ISTTService, IDisposable
     {
         if (_disposed)
             return;
-
-        _logger.LogDebug("Disposing STT service");
 
         _whisperProcessor?.Dispose();
         _whisperFactory?.Dispose();

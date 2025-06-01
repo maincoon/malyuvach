@@ -9,13 +9,12 @@ namespace Malyuvach.Services.STT;
 /// Audio format converter for OGG/Opus to PCM WAV
 /// </summary>
 public static class AudioConverter
-{
-    /// <summary>
-    /// Converts OGG/Opus stream to WAV PCM format suitable for Whisper.net
-    /// </summary>
-    /// <param name="oggStream">Input OGG/Opus stream</param>
-    /// <param name="cancellationToken">Cancellation token</param>
-    /// <returns>WAV formatted stream</returns>
+{    /// <summary>
+     /// Converts OGG/Opus stream to WAV PCM format suitable for Whisper.net
+     /// </summary>
+     /// <param name="oggStream">Input OGG/Opus stream</param>
+     /// <param name="cancellationToken">Cancellation token</param>
+     /// <returns>WAV formatted stream</returns>
     public static async Task<MemoryStream> ConvertOggOpusToWav(Stream oggStream, CancellationToken cancellationToken = default)
     {
         try
@@ -24,13 +23,9 @@ public static class AudioConverter
             if (oggStream.CanSeek)
                 oggStream.Position = 0;
 
-            Console.WriteLine($"[AudioConverter] Starting OGG/Opus conversion. Input size: {oggStream.Length} bytes");
-
             // Create Opus decoder for mono 48kHz (Telegram default)
             var decoder = OpusCodecFactory.CreateDecoder(48000, 1);
             var oggIn = new OpusOggReadStream(decoder, oggStream);
-
-            Console.WriteLine("[AudioConverter] Created Opus decoder and OGG reader");
 
             // Prepare output stream with WAV header for 16kHz mono PCM
             const int sampleRate = 16000;
@@ -42,14 +37,9 @@ public static class AudioConverter
             // Write WAV header (44 bytes)
             await WriteWavHeader(wavStream, sampleRate, channels, bitsPerSample);
 
-            Console.WriteLine("[AudioConverter] Written WAV header");
-
             // Decode and resample audio
-            var pcmBuffer = new short[960]; // Opus frame size for 20ms at 48kHz
             var resampleBuffer = new short[320]; // Target frame size for 20ms at 16kHz
-
             long totalSamples = 0;
-            int packetCount = 0;
 
             while (oggIn.HasNextPacket)
             {
@@ -58,7 +48,6 @@ public static class AudioConverter
                 var samplesDecoded = oggIn.DecodeNextPacket();
                 if (samplesDecoded != null && samplesDecoded.Length > 0)
                 {
-                    packetCount++;
                     // Simple downsampling from 48kHz to 16kHz (3:1 ratio)
                     var outputSamples = Resample48to16(samplesDecoded, samplesDecoded.Length, resampleBuffer);
 
@@ -73,19 +62,15 @@ public static class AudioConverter
                 }
             }
 
-            Console.WriteLine($"[AudioConverter] Processed {packetCount} packets, total samples: {totalSamples}");
-
             // Update WAV header with actual data size
             await UpdateWavHeader(wavStream, totalSamples, sampleRate, channels, bitsPerSample);
 
             // Reset stream position for reading
             wavStream.Position = 0;
-            Console.WriteLine($"[AudioConverter] Conversion completed. Output WAV size: {wavStream.Length} bytes");
             return wavStream;
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[AudioConverter] Error: {ex.Message}");
             throw new InvalidOperationException($"Failed to convert OGG/Opus to WAV: {ex.Message}", ex);
         }
     }
