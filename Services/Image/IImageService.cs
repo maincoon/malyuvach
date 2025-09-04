@@ -6,8 +6,7 @@ public interface IImageService
         string positivePrompt,
         string negativePrompt,
         string orientation,
-        long seed,
-        int steps);
+        long seed);
 
     Task<byte[]?> WaitForPromptImageAsync(string promptId);
 }

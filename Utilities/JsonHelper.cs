@@ -50,11 +50,11 @@ public static class JsonHelper
     /// </summary>
     public static void SetJsonObjectValues<T>(
         JsonNode? objValue,
-        IEnumerable<string> keys,
+        IEnumerable<string>? keys,
         T value,
         JsonSerializerOptions jsonOptions)
     {
-        if (objValue == null) return;
+        if (objValue == null || keys == null) return;
 
         foreach (var key in keys)
         {

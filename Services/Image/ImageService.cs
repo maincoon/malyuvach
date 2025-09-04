@@ -30,16 +30,15 @@ public class ImageService : IImageService
         string positivePrompt,
         string negativePrompt,
         string orientation,
-        long seed,
-        int steps)
+        long seed)
     {
         try
         {
             _logger.LogDebug("Starting image generation with params: Orientation={Orientation}, Steps={Steps}, Seed={Seed}",
-                orientation, steps, seed);
+                orientation, _settings.ImageIterationSteps, seed);
 
             // Load workflow template
-            var promptApiText = await File.ReadAllTextAsync(_settings.Workflow.ComfyUIWorkflowPath);
+            var promptApiText = await File.ReadAllTextAsync(_settings.Workflow.ComfyUIWorkflowPath!);
             var workflowJson = JsonNode.Parse(promptApiText)!;
 
             _logger.LogDebug("Loaded workflow template from {Path}", _settings.Workflow.ComfyUIWorkflowPath);
@@ -65,7 +64,7 @@ public class ImageService : IImageService
 
             // Set other parameters
             JsonHelper.SetJsonObjectValues(workflowJson, _settings.Workflow.NoiseSeedFieldId, seed, _jsonOptions.Value);
-            JsonHelper.SetJsonObjectValues(workflowJson, _settings.Workflow.StepsFieldId, steps, _jsonOptions.Value);
+            JsonHelper.SetJsonObjectValues(workflowJson, _settings.Workflow.StepsFieldId, _settings.ImageIterationSteps, _jsonOptions.Value);
 
             // Create the final prompt object with the workflow
             var promptApiJson = new JsonObject
@@ -137,9 +136,9 @@ public class ImageService : IImageService
                 _logger.LogTrace("ComfyUI history response: {Response}", responseContent);
 
                 var responseJson = JsonNode.Parse(responseContent);
-                if (responseJson?[promptId]?["outputs"]?[_settings.Workflow.OutputNodeId]?["images"] != null)
+                if (responseJson?[promptId]?["outputs"]?[_settings.Workflow.OutputNodeId!]?["images"] != null)
                 {
-                    var outputFile = responseJson[promptId]!["outputs"]![_settings.Workflow.OutputNodeId]!
+                    var outputFile = responseJson[promptId]!["outputs"]![_settings.Workflow.OutputNodeId!]!
                         ["images"]![0]!["filename"]!.GetValue<string>();
 
                     _logger.LogDebug("Prompt {PromptId} finished - {OutputFile}", promptId, outputFile);

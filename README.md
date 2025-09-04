@@ -1,156 +1,237 @@
 # malyuvach
 
-Telegram AI drawing bot that combines LLM for prompt generation with ComfyUI for image creation. The bot uses LLM to understand user requests and generate appropriate prompts for image generation. It also supports speech-to-text functionality for voice messages using Whisper.Net.
+Telegram AI drawing & conversational bot. It combines:
 
-## Requirements
+* Ollama-hosted local LLM (prompt + dialogue management)
+* ComfyUI workflow execution for image generation
+* Optional Whisper.Net speech‑to‑text (Telegram voice / audio → text)
+* Persistent per‑chat context with automatic trimming
+* Serilog structured logging (console + rolling file)
 
-* .NET 8 SDK
-* [Ollama](https://ollama.com/) for LLM functionality (default port: 11434)
-* [ComfyUI](https://github.com/comfyanonymous/ComfyUI) for image generation (default port: 8188)
-* [Whisper model files](https://huggingface.co/ggerganov/whisper.cpp) for speech-to-text functionality (optional)
+> Name comes from Ukrainian "Малювач" ("one who draws").
 
-### Hardware Requirements
+## ✨ Features
 
-* For Gemma 2B model: ~4GB VRAM
-* For Pixelwave Flux workflow: ~24GB VRAM (for default 1200x800 resolution)
-* For STT (Speech-to-Text): CPU or GPU depending on configuration
+* Group & private chat support (responds when mentioned or replied to in groups)
+* JSON based internal response contract (text + prompt + orientation)
+* Configurable system prompts (main + optional JSON validator stage)
+* Pluggable ComfyUI workflows (map node fields in config – no code changes)
+* Deterministic seeds & orientation handling (portrait swaps dimensions automatically)
+* Whisper.Net STT with OGG/Opus → WAV conversion (Concentus)
+* Context persistence on disk (one JSON file per chat id)
+* Safe retries & context rollback for malformed LLM answers
 
-## Installation
+## 🧱 Requirements
 
-Clone the repository and build the project:
+* .NET 8 SDK (build & run)
+* [Ollama](https://ollama.com/) running locally (default: 11434)
+* [ComfyUI](https://github.com/comfyanonymous/ComfyUI) (default: 8188)
+* (Optional) Whisper model `.bin` file for STT (Whisper.Net format)
+
+### Hardware Notes
+
+| Component | Minimal | Recommended |
+|-----------|---------|------------|
+| LLM (small, e.g. gemma2 / gpt-oss) | 4GB VRAM | >8GB VRAM or fast CPU |
+| Image (example Qwen / Flux style workflow 1328x784 @ 8 steps) | ~12GB VRAM | 16–24GB VRAM for higher res / steps |
+| STT (CPU) | 2 cores | 8+ threads for medium model |
+
+You can reduce VRAM usage by lowering resolution or steps in workflow config.
+
+## 🚀 Quick Start
 
 ```bash
 git clone https://github.com/maincoon/malyuvach.git
 cd malyuvach
-dotnet build
-dotnet publish -c Release -o release
-```
+dotnet publish -c Release -o out
 
-Copy configuration files and start the application:
+# Copy or create config files
+cp appsettings.json out/
+cp appsettings.Development.json out/ 2>/dev/null || true
+cp appsettings.Production.json out/ 2>/dev/null || true
 
-```bash
-cp appsettings.json release/
-cd release
-export DOTNET_USE_POLLING_FILE_WATCHER=1
+cd out
+# (Optional) choose environment: Development | Production (default depends on host)
+export DOTNET_ENVIRONMENT=Production
 ./Malyuvach
 ```
 
-## Configuration
+> Use `DOTNET_ENVIRONMENT` (preferred for worker services) or `ASPNETCORE_ENVIRONMENT` to select the config overlay.
 
-The application uses the following configuration hierarchy:
+## 🧩 Configuration Overview
 
-1. `appsettings.json` - base configuration template
-2. `appsettings.Development.json` - for development environment
-3. `appsettings.Production.json` - for production environment
+Config root section: `Malyuvach`. Environment specific files overlay the base `appsettings.json`.
 
-### Required Configuration
+### LLM Settings (`Malyuvach:LLM`)
 
-Create `appsettings.Production.json` with the following essential settings:
+| Key | Description | Default (base) |
+|-----|-------------|----------------|
+| `ModelName` | Ollama model tag (`ollama pull ...`) | `gemma2:latest` |
+| `OllamaUIBaseUrl` | Ollama API base URL | `http://127.0.0.1:11434` |
+| `MaxContextSize` | Tokens (NumCtx passed to Ollama) | `4096` |
+| `MaxContextMsgs` | Max retained messages (system + N) | `10` |
+| `MaxAnswerRetries` | Retries when JSON parse fails | `3` |
+| `JSONValidatorTemperature` | Temperature for validator stage | `0.2` |
+| `DialogTemperature` | Temperature for main dialogue | `1.0` |
+| `UseJSONValidator` | If true, second pass validation chat | `false` |
+| `JSONValidatorSystemPromptPath` | Path to validator system prompt | `workflow/system-prompt-json-validator.md` |
+| `MainSystemPromptPath` | Path to main system prompt | `workflow/system-prompt.md` |
+| `ContextsPath` | Directory for chat context files | `contexts` |
 
-```json
+### Image Settings (`Malyuvach:Image`)
+
+| Key | Description | Example |
+|-----|-------------|---------|
+| `ComfyUIBaseUrl` | ComfyUI REST base | `http://127.0.0.1:8188` |
+| `ImageIterationSteps` | Diffusion steps (applied to mapped node) | `8` |
+| `ImageDefaultXDimension` | Default width (landscape) | `1328` |
+| `ImageDefaultYDimension` | Default height (landscape) | `784` |
+| `Workflow.ComfyUIWorkflowPath` | Workflow JSON used for API call | `workflow/Qwen-image-lora-8step.json` |
+| `Workflow.*FieldId` | List of JSON pointer‑like identifiers to update inside workflow | see below |
+| `Workflow.OutputNodeId` | Node id producing final image | `84` |
+
+Field id strings correspond to nested lookup path `<nodeId>.inputs.<property>` inside the ComfyUI workflow JSON.
+
+### Telegram Settings (`Malyuvach:Telegram`)
+
+| Key | Description |
+|-----|-------------|
+| `BotKey` | Telegram bot token (use secret storage!) |
+| `BotNames` | Variants for mention detection in groups |
+| `BotShowRoomChannel` | Optional channel id / @name for reposting images |
+| `SkipUpdates` | If true, drains backlog once at start |
+
+### STT Settings (`Malyuvach:STT`)
+
+| Key | Description | Default (code) |
+|-----|-------------|---------------|
+| `ModelPath` | Path to Whisper `.bin` model | `models/ggml-base.bin` (overridden in sample configs) |
+| `UseGPU` | Enable GPU (if Whisper.Net built with CUDA) | `false` |
+| `Language` | Target language OR `auto` for detection | `auto` |
+| `Threads` | Processing threads (0 = auto) | `0` |
+| `Translate` | Force translate non‑English → English | `false` |
+
+If STT model file is missing the bot silently ignores voice messages.
+
+### Minimal Production Overlay Example
+
+```jsonc
+// appsettings.Production.json
 {
   "Malyuvach": {
-    "LLM": {
-      "OllamaUIBaseUrl": "http://127.0.0.1:11434"
-    },
+    "LLM": { "ModelName": "gpt-oss:latest" },
     "Image": {
-      "ComfyUIBaseUrl": "http://127.0.0.1:8188"
+      "ComfyUIBaseUrl": "http://127.0.0.1:8188",
+      "ImageIterationSteps": 8,
+      "ImageDefaultXDimension": 1328,
+      "ImageDefaultYDimension": 784,
+      "Workflow": {
+        "ComfyUIWorkflowPath": "workflow/Qwen-image-lora-8step.json",
+        "PositivePromptFieldId": ["6.inputs.text"],
+        "NegativePromptFieldId": ["7.inputs.text"],
+        "ImageWidthFieldId": ["58.inputs.width"],
+        "ImageHeightFieldId": ["58.inputs.height"],
+        "NoiseSeedFieldId": ["3.inputs.seed"],
+        "StepsFieldId": ["3.inputs.steps"],
+        "OutputNodeId": "84"
+      }
     },
     "Telegram": {
-      "BotKey": "YOUR_BOT_TOKEN",
-      "BotNames": ["YOUR_BOT_NAME"],
-      "BotShowRoomChannel": "OPTIONAL_CHANNEL_ID"
+      "BotNames": ["@malyuvach_bot", "malyuvach", "малювач"],
+      "BotKey": "REPLACE_ME",
+      "SkipUpdates": true
     },
     "STT": {
       "ModelPath": "workflow/ggml-medium.bin",
-      "UseGpu": false,
+      "UseGPU": false,
       "Language": "auto",
-      "Threads": 4,
+      "Threads": 8,
       "Translate": false
     }
   }
 }
 ```
 
-### Telegram Bot Setup
+### Environment Variable Overrides
 
-1. Create a new bot through [BotFather](https://core.telegram.org/bots#botfather)
-2. Get the bot token and add it to your configuration
-3. Optionally set up a showcase channel where the bot will post generated images
+All settings can be overridden via standard .NET double underscore syntax:
 
-## System Prompts
-
-The bot uses two types of system prompts located in the `workflow` directory:
-
-* `system-prompt.md` - main prompt for user interaction and image prompt generation
-* `system-prompt-json-validator.md` - optional JSON validator prompt (can be disabled in settings)
-
-User conversation contexts are stored in the `contexts` directory (configurable through settings).
-
-## Speech-to-Text (STT) Configuration
-
-The bot supports voice message transcription using Whisper.Net. To enable this feature:
-
-1. Download a Whisper model file (e.g., `ggml-base.bin`) from [Hugging Face](https://huggingface.co/ggerganov/whisper.cpp)
-2. Configure the STT settings in your appsettings.json:
-
-```json
-"STT": {
-    "ModelPath": "workflow/ggml-medium.bin",
-    "UseGpu": false,
-    "Language": "auto",
-    "Threads": 4,
-    "Translate": false
-}
+```bash
+export MALYUVACH__TELEGRAM__BOTKEY=123:ABC
+export MALYUVACH__LLM__MODELNAME=gemma2:latest
+export MALYUVACH__IMAGE__IMAGEITERATIONSTEPS=6
 ```
 
-**Note**: The bot now supports Telegram voice messages (OGG/Opus format) through automatic conversion to WAV using the Concentus library for native .NET audio processing.
+### Security Note
 
-### STT Configuration Options
+Never commit real `BotKey`. Use:
 
-* `ModelPath` - path to the Whisper model file (.bin format)
-* `UseGpu` - enable GPU acceleration (requires CUDA support)
-* `Language` - target language code (e.g., "en", "ru") or "auto" for auto-detection
-* `Threads` - number of threads for CPU processing
-* `Translate` - translate non-English audio to English
+* User secrets (during dev): `dotnet user-secrets set "Malyuvach:Telegram:BotKey" "123:ABC"`
+* Environment variables / secret managers in production.
 
-**Note:** If STT is not configured or the model file is missing, voice messages will be ignored without error.
+## 🤖 Telegram Interaction Rules
 
-## ComfyUI Workflow Configuration
+Bot answers when:
 
-The bot supports custom ComfyUI workflows. Configure workflow node IDs in the settings:
+1. Private chat (always)
+2. Group message contains any `BotNames` variant
+3. Your message replies to a bot message
 
-```json
-"Workflow": {
-    "ComfyUIWorkflowPath": "workflow/workflow_api-flux-schnell.json",
-    "PositivePromptFieldId": ["6.inputs.text"],
-    "NegativePromptFieldId": ["7.inputs.text"],
-    "ImageWidthFieldId": ["5.inputs.width"],
-    "ImageHeightFieldId": ["5.inputs.height"],
-    "NoiseSeedFieldId": ["25.inputs.noise_seed"],
-    "StepsFieldId": ["17.inputs.steps"],
-    "OutputNodeId": "26"
-}
-```
+Orientation is chosen from model output; `portrait` swaps dimensions automatically.
 
-Any ComfyUI workflow can be used as long as it provides nodes with these field purposes:
+## 🧠 System Prompts
 
-* Positive prompt input
-* Negative prompt input
-* Image dimensions (width/height)
-* Noise seed for randomization
-* Steps count for the diffusion process
-* Output node for the final image
+* `workflow/system-prompt.md` – main behavior & JSON output contract
+* `workflow/system-prompt-json-validator.md` – optional second-pass normalizer (enable with `UseJSONValidator=true`)
 
-The default configuration uses Gemma 2B for LLM and Pixelwave Flux workflow for image generation, requiring approximately 24GB VRAM for default image resolution (1200x800).
+## 🗂 Context Persistence
 
-## Architecture
+Each chat id → `contexts/<chatId>.json`. Context trimmed to `MaxContextMsgs` (system prompt retained). Delete a file to reset conversation.
 
-The application consists of four main services:
+## 🖼 ComfyUI Workflow Mapping
 
-* LLM Service - handles communication with Ollama API for text generation
-* Image Service - manages ComfyUI workflow execution and image generation
-* Telegram Service - provides bot interface and user interaction
-* STT Service - processes voice messages using Whisper.Net for speech-to-text conversion
+Provide a workflow JSON exported from ComfyUI. Identify nodes & fields to patch (text, width, height, seed, steps). Those paths are updated before POSTing to `/prompt`. The service polls `/history/{promptId}` until an image appears under the configured `OutputNodeId` then fetches via `/view`.
 
-Each service has its own configuration section in appsettings.json for easy customization.
+## 🎙 Speech To Text (Optional)
+
+1. Download a Whisper model (e.g. `ggml-medium.bin`).
+2. Place it at the configured `ModelPath`.
+3. Set `STT` section (or leave default to disable gracefully).
+
+Audio voice messages (Opus OGG) are converted to WAV in‑memory and streamed into Whisper.Net.
+
+## 🪵 Logging
+
+Serilog writes to:
+
+* Console (Debug+)
+* `logs/log-<date>.txt` (rolling daily)
+
+Adjust in `Serilog` section if needed.
+
+## 🔄 LLM Answer Flow
+
+1. Append user message
+2. Stream tokens → aggregate answer
+3. (Optional) validator pass
+4. Parse JSON → if fail, rollback added messages & retry (up to `MaxAnswerRetries`)
+5. Persist trimmed context
+
+## 🧪 Testing Your Setup
+
+* Pull model: `ollama pull gemma2:latest` (or your chosen model)
+* Start ComfyUI with your workflow loaded & verify node IDs
+* Run the bot & send: `@malyuvach_bot draw a serene cyberpunk river at dusk`
+
+If only `text` is returned (no `prompt`), the bot replies with conversation text only.
+
+## 🚧 Roadmap / Ideas
+
+* Multi-image / variation requests
+* Negative prompt generation heuristics
+* Image to prompt (reverse) support
+* Optional external storage for contexts (SQLite)
+* Image editing (inpainting) support
+
+---
+Made with local AI tooling & ❤️. PRs welcome.

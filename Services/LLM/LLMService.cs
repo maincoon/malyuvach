@@ -1,10 +1,14 @@
+using System.Text;
+using System.Collections.Generic;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Malyuvach.Configuration;
 using Malyuvach.Models;
 using Microsoft.Extensions.Options;
 using OllamaSharp;
 using OllamaSharp.Models;
 using OllamaSharp.Models.Chat;
+using Malyuvach.Services.Utilities;
 
 namespace Malyuvach.Services.LLM;
 
@@ -25,6 +29,19 @@ public class LLMService : ILLMService
         _settings = settings.Value;
         _jsonOptions = jsonOptions;
         _logger.LogInformation("LLM service initialized with model {Model}", _settings.ModelName);
+    }
+
+    private OllamaApiClient CreateOllamaClient()
+    {
+        return new OllamaApiClient(
+            new HttpClient(
+                new FixModelTTLHandler(_jsonOptions.Value))
+            {
+                BaseAddress = new Uri(_settings.OllamaUIBaseUrl)
+            })
+        {
+            SelectedModel = _settings.ModelName
+        };
     }
 
     private string GetSystemPrompt()
@@ -137,17 +154,16 @@ public class LLMService : ILLMService
         {
             try
             {
-                var ollama = new OllamaApiClient(new Uri(_settings.OllamaUIBaseUrl));
-                ollama.SelectedModel = _settings.ModelName;
+                var ollama = CreateOllamaClient();
+                var chat = new Chat(ollama, GetJsonValidatorSystemPrompt());
 
-                var validator = new Chat(ollama, GetJsonValidatorSystemPrompt());
-                validator.Options = new RequestOptions
+                chat.Options = new RequestOptions
                 {
                     NumCtx = 8192,
                     Temperature = _settings.JSONValidatorTemperature
                 };
 
-                var response = validator.SendAsync(message, cancellationToken);
+                var response = chat.SendAsync(message, cancellationToken);
                 answer = string.Empty;
 
                 await foreach (var token in response)
@@ -224,11 +240,12 @@ public class LLMService : ILLMService
         }
     }
 
+
     public Chat LoadContext(string contextId)
     {
-        var ollamaClient = new OllamaApiClient(new Uri(_settings.OllamaUIBaseUrl));
-        ollamaClient.SelectedModel = _settings.ModelName;
-        var chat = new Chat(ollamaClient, GetSystemPrompt());
+        var ollama = CreateOllamaClient();
+        var chat = new Chat(ollama, GetSystemPrompt());
+
         chat.Options = new RequestOptions
         {
             NumCtx = _settings.MaxContextSize,

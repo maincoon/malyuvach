@@ -288,8 +288,7 @@ public class TelegramService : ITelegramService
                 answer.prompt,
                 string.Empty,
                 answer.orientation ?? "landscape",
-                seed,
-                6);
+                seed);
 
             if (imageData != null)
             {
