@@ -1,6 +1,5 @@
 using System.Text.Encodings.Web;
 using System.Text.Json;
-using System.Text.Unicode;
 using Malyuvach.Configuration;
 using Malyuvach.Services;
 using Malyuvach.Services.Image;
@@ -28,10 +27,11 @@ var host = Host.CreateDefaultBuilder(args)
         services.Configure<JsonSerializerOptions>(options =>
         {
             options.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
-            options.WriteIndented = true;
+            options.WriteIndented = true; // Human‑readable JSON
             options.ReadCommentHandling = JsonCommentHandling.Skip;
             options.AllowTrailingCommas = true;
-            options.Encoder = JavaScriptEncoder.Create(UnicodeRanges.BasicLatin, UnicodeRanges.Cyrillic);
+            // Use a relaxed encoder to avoid escaping non-ASCII characters
+            options.Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping;
         });
 
         // Register services

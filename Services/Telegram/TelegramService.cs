@@ -39,8 +39,21 @@ public class TelegramService : ITelegramService
     {
         if (_settings.SkipUpdates)
         {
-            var updates = await _botClient.GetUpdatesAsync(cancellationToken: cancellationToken);
-            _logger.LogInformation("Skipped {Count} updates", updates.Length);
+            // Drain and acknowledge all pending updates so bot doesn't process historical messages
+            int totalSkipped = 0;
+            while (true)
+            {
+                var updates = await _botClient.GetUpdatesAsync(limit: 100, timeout: 0, cancellationToken: cancellationToken);
+                if (updates.Length == 0)
+                    break;
+
+                totalSkipped += updates.Length;
+                var lastUpdateId = updates[^1].Id;
+                // Acknowledge updates by requesting the next (non-existent) one with offset = lastUpdateId + 1
+                await _botClient.GetUpdatesAsync(offset: lastUpdateId + 1, limit: 1, timeout: 0, cancellationToken: cancellationToken);
+                _logger.LogInformation("Skipped batch of {Batch} updates (last id {LastId})", updates.Length, lastUpdateId);
+            }
+            _logger.LogInformation("SkipUpdates enabled: skipped total {Total} pending updates", totalSkipped);
         }
 
         _botClient.StartReceiving(
