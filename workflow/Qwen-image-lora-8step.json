@@ -1,7 +1,7 @@
 {
   "3": {
     "inputs": {
-      "seed": 1028111891086149,
+      "seed": 1017910264159519,
       "steps": 8,
       "cfg": 1,
       "sampler_name": "euler",
@@ -31,7 +31,7 @@
   },
   "6": {
     "inputs": {
-      "text": "PROMPT",
+      "text": "Something beautiful",
       "clip": [
         "83",
         0
@@ -73,7 +73,7 @@
   },
   "39": {
     "inputs": {
-      "vae_name": "Qwen/qwen_image_vae.safetensors"
+      "vae_name": "qwen_image_vae.safetensors"
     },
     "class_type": "VAELoader",
     "_meta": {
@@ -95,7 +95,7 @@
     "inputs": {
       "shift": 1.3,
       "model": [
-        "92",
+        "75",
         0
       ]
     },
@@ -106,7 +106,7 @@
   },
   "75": {
     "inputs": {
-      "lora_name": "Qwen/Qwen-Image-Lightning-8steps-V1.1-bf16.safetensors",
+      "lora_name": "Qwen/Qwen-Image-Lightning-8steps-V2.0-bf16.safetensors",
       "strength_model": 1,
       "model": [
         "89",
@@ -147,20 +147,6 @@
     "class_type": "UnetLoaderGGUF",
     "_meta": {
       "title": "Unet Loader (GGUF)"
-    }
-  },
-  "92": {
-    "inputs": {
-      "lora_name": "Qwen/lora/flymy_realism.safetensors",
-      "strength_model": 1,
-      "model": [
-        "75",
-        0
-      ]
-    },
-    "class_type": "LoraLoaderModelOnly",
-    "_meta": {
-      "title": "LoraLoaderModelOnly"
     }
   }
 }

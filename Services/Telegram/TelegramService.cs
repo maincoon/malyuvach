@@ -95,7 +95,8 @@ public class TelegramService : ITelegramService
             {
                 messageText = await ProcessAudioMessageAsync(
                     botClient, update.Message, chatId.Value,
-                    messageId.Value, cancellationToken);
+                    chatType, messageId.Value, cancellationToken);
+
                 if (string.IsNullOrEmpty(messageText))
                     return;
             }
@@ -134,9 +135,28 @@ public class TelegramService : ITelegramService
         ITelegramBotClient botClient,
         Message message,
         long chatId,
+        string chatType,
         int messageId,
         CancellationToken cancellationToken)
     {
+
+        if (chatType == "private")
+        {
+            _logger.LogInformation("INPUT: {ChatType} {Username}({UserId}) voice",
+                chatType,
+                message.From?.Username,
+                message.From?.Id);
+        }
+        else
+        {
+            _logger.LogInformation("INPUT: {ChatType} {Username}({UserId})@{ChatTitle}({ChatId}) voice",
+                chatType,
+                message.From?.Username,
+                message.From?.Id,
+                message.Chat.Title,
+                message.Chat.Id);
+        }
+
         string fileId = message.Voice?.FileId ?? message.Audio?.FileId!;
 
         if (string.IsNullOrEmpty(fileId))
@@ -366,11 +386,11 @@ public class TelegramService : ITelegramService
         var errorMessage = exception switch
         {
             ApiRequestException apiRequestException =>
-                $"Telegram API Error:\n[{apiRequestException.ErrorCode}]\n{apiRequestException.Message}",
+                $"API Error:\n[{apiRequestException.ErrorCode}]\n{apiRequestException.Message}",
             _ => exception.ToString()
         };
 
-        _logger.LogError(exception, "{ErrorMessage}", errorMessage);
-        return Task.CompletedTask;
+        _logger.LogError(exception, "Polling Error: {ErrorMessage}", errorMessage);
+        return Task.Delay(1000, cancellationToken); // Prevent tight loop in case of continuous errors
     }
 }

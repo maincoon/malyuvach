@@ -13,4 +13,5 @@ public class LLMSettings
     public string? JSONValidatorSystemPromptPath { get; set; }
     public string? MainSystemPromptPath { get; set; }
     public string ContextsPath { get; set; } = "contexts";
+    public int MaxAnswerLength { get; set; } = 4096;
 }

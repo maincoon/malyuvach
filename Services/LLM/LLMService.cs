@@ -92,6 +92,12 @@ public class LLMService : ILLMService
                 await foreach (var token in response)
                 {
                     answer += token;
+                    if (answer.Length > _settings.MaxAnswerLength)
+                    {
+                        _logger.LogWarning("Answer exceeded max length of {MaxLength}, retrying", _settings.MaxAnswerLength);
+                        FixContext(chat, chat.Messages.Count - initialMessagesCount);
+                        continue;
+                    }
                 }
 
                 answer = answer.Trim();
@@ -249,7 +255,8 @@ public class LLMService : ILLMService
         chat.Options = new RequestOptions
         {
             NumCtx = _settings.MaxContextSize,
-            Temperature = _settings.DialogTemperature
+            Temperature = _settings.DialogTemperature,
+            RepeatPenalty = 1.5f
         };
 
         try

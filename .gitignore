@@ -3,6 +3,7 @@ obj/*
 appsettings.*.json
 logs/*
 contexts/*
+workflow/*.bin
 .aider*
 *.log
 *~
