@@ -9,10 +9,12 @@ namespace Malyuvach.Services.Utilities;
 public class FixModelTTLHandler : DelegatingHandler
 {
     private readonly JsonSerializerOptions _jsonOptions;
+    private readonly int? _keepAlive;
 
-    public FixModelTTLHandler(JsonSerializerOptions jsonOptions)
+    public FixModelTTLHandler(JsonSerializerOptions jsonOptions, int? keepAlive = 0)
     {
         _jsonOptions = jsonOptions;
+        _keepAlive = keepAlive;
         InnerHandler = new HttpClientHandler();
     }
 
@@ -25,7 +27,7 @@ public class FixModelTTLHandler : DelegatingHandler
             if (!string.IsNullOrWhiteSpace(jsonText))
             {
                 var root = JsonSerializer.Deserialize<Dictionary<string, object?>>(jsonText, _jsonOptions)!;
-                root["keep_alive"] = 0;
+                root["keep_alive"] = _keepAlive;
                 var updatedJson = JsonSerializer.Serialize(root, _jsonOptions);
                 var mediaType = request.Content.Headers.ContentType?.MediaType ?? "application/json";
                 request.Content = new StringContent(updatedJson, Encoding.UTF8, mediaType);

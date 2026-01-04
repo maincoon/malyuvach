@@ -8,3 +8,4 @@ workflow/*.bin
 *.log
 *~
 ORIGINAL/*
+release/*

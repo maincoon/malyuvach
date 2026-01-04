@@ -15,7 +15,7 @@ namespace Malyuvach.Services.LLM;
 public class LLMService : ILLMService
 {
     private readonly ILogger<LLMService> _logger;
-    private readonly LLMSettings _settings;
+    private readonly IOptions<LLMSettings> _settings;
     private readonly IOptions<JsonSerializerOptions> _jsonOptions;
     private string _systemPromptCache = string.Empty;
     private string _jsonValidatorSystemPromptCache = string.Empty;
@@ -26,22 +26,39 @@ public class LLMService : ILLMService
         IOptions<JsonSerializerOptions> jsonOptions)
     {
         _logger = logger;
-        _settings = settings.Value;
+        _settings = settings;
         _jsonOptions = jsonOptions;
-        _logger.LogInformation("LLM service initialized with model {Model}", _settings.ModelName);
+        _logger.LogInformation("LLM service initialized with model {Model}", _settings.Value.ModelName);
     }
 
     private OllamaApiClient CreateOllamaClient()
     {
-        return new OllamaApiClient(
-            new HttpClient(
-                new FixModelTTLHandler(_jsonOptions.Value))
-            {
-                BaseAddress = new Uri(_settings.OllamaUIBaseUrl)
-            })
+        // Create HttpClient with FixModelTTLHandler if OllamaKeepAlive is set
+        if (_settings.Value.OllamaKeepAlive.HasValue)
         {
-            SelectedModel = _settings.ModelName
-        };
+            _logger.LogDebug("Ollama keep_alive={KeepAlive}", _settings.Value.OllamaKeepAlive);
+            return new OllamaApiClient(
+                new HttpClient(
+                    new FixModelTTLHandler(_jsonOptions.Value, _settings.Value.OllamaKeepAlive))
+                {
+                    BaseAddress = new Uri(_settings.Value.OllamaUIBaseUrl)
+                })
+            {
+                SelectedModel = _settings.Value.ModelName
+            };
+        }
+        else
+        {
+            _logger.LogDebug("Ollama keep_alive not set, using default");
+            return new OllamaApiClient(
+                new HttpClient()
+                {
+                    BaseAddress = new Uri(_settings.Value.OllamaUIBaseUrl)
+                })
+            {
+                SelectedModel = _settings.Value.ModelName
+            };
+        }
     }
 
     private string GetSystemPrompt()
@@ -50,12 +67,12 @@ public class LLMService : ILLMService
         {
             if (string.IsNullOrEmpty(_systemPromptCache))
             {
-                _systemPromptCache = File.ReadAllText(_settings.MainSystemPromptPath!);
+                _systemPromptCache = File.ReadAllText(_settings.Value.MainSystemPromptPath!);
             }
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error reading system prompt from {Path}", _settings.MainSystemPromptPath);
+            _logger.LogError(ex, "Error reading system prompt from {Path}", _settings.Value.MainSystemPromptPath);
         }
         return _systemPromptCache;
     }
@@ -66,12 +83,12 @@ public class LLMService : ILLMService
         {
             if (string.IsNullOrEmpty(_jsonValidatorSystemPromptCache))
             {
-                _jsonValidatorSystemPromptCache = File.ReadAllText(_settings.JSONValidatorSystemPromptPath!);
+                _jsonValidatorSystemPromptCache = File.ReadAllText(_settings.Value.JSONValidatorSystemPromptPath!);
             }
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error reading JSON validator system prompt from {Path}", _settings.JSONValidatorSystemPromptPath);
+            _logger.LogError(ex, "Error reading JSON validator system prompt from {Path}", _settings.Value.JSONValidatorSystemPromptPath);
         }
         return _jsonValidatorSystemPromptCache;
     }
@@ -80,7 +97,7 @@ public class LLMService : ILLMService
     {
         var chat = LoadContext(contextId);
         var initialMessagesCount = chat.Messages.Count;
-        var retries = _settings.MaxAnswerRetries;
+        var retries = _settings.Value.MaxAnswerRetries;
 
         while (retries > 0)
         {
@@ -92,16 +109,16 @@ public class LLMService : ILLMService
                 await foreach (var token in response)
                 {
                     answer += token;
-                    if (answer.Length > _settings.MaxAnswerLength)
+                    if (answer.Length > _settings.Value.MaxAnswerLength)
                     {
-                        _logger.LogWarning("Answer exceeded max length of {MaxLength}, retrying", _settings.MaxAnswerLength);
+                        _logger.LogWarning("Answer exceeded max length of {MaxLength}, retrying", _settings.Value.MaxAnswerLength);
                         FixContext(chat, chat.Messages.Count - initialMessagesCount);
                         continue;
                     }
                 }
 
                 answer = answer.Trim();
-                _logger.LogDebug("ANSWER ({Model}): {Answer}", _settings.ModelName, answer);
+                _logger.LogDebug("ANSWER ({Model}): {Answer}", _settings.Value.ModelName, answer);
 
                 var result = await ValidateJSONAsync(answer, cancellationToken);
                 if (result == null)
@@ -109,8 +126,8 @@ public class LLMService : ILLMService
                     if (--retries > 0)
                     {
                         _logger.LogWarning("Retry {Attempt}/{Max} for context {ContextId}",
-                            _settings.MaxAnswerRetries - retries + 1,
-                            _settings.MaxAnswerRetries,
+                            _settings.Value.MaxAnswerRetries - retries + 1,
+                            _settings.Value.MaxAnswerRetries,
                             contextId);
 
                         FixContext(chat, chat.Messages.Count - initialMessagesCount);
@@ -129,7 +146,7 @@ public class LLMService : ILLMService
                 SaveContext(chat, contextId);
 
                 _logger.LogDebug("Context managed: {ContextId} ({Count}/{Max} messages)",
-                    contextId, chat.Messages.Count, _settings.MaxContextMsgs);
+                    contextId, chat.Messages.Count, _settings.Value.MaxContextMsgs);
 
                 return result;
             }
@@ -143,8 +160,8 @@ public class LLMService : ILLMService
                 }
 
                 _logger.LogWarning("Retry {Attempt}/{Max} after error for context {ContextId}",
-                    _settings.MaxAnswerRetries - retries + 1,
-                    _settings.MaxAnswerRetries,
+                    _settings.Value.MaxAnswerRetries - retries + 1,
+                    _settings.Value.MaxAnswerRetries,
                     contextId);
             }
         }
@@ -156,7 +173,7 @@ public class LLMService : ILLMService
     {
         var answer = message;
 
-        if (_settings.UseJSONValidator)
+        if (_settings.Value.UseJSONValidator)
         {
             try
             {
@@ -166,7 +183,7 @@ public class LLMService : ILLMService
                 chat.Options = new RequestOptions
                 {
                     NumCtx = 8192,
-                    Temperature = _settings.JSONValidatorTemperature
+                    Temperature = _settings.Value.JSONValidatorTemperature
                 };
 
                 var response = chat.SendAsync(message, cancellationToken);
@@ -194,7 +211,7 @@ public class LLMService : ILLMService
             .Trim();
 
         _logger.LogDebug("Validator raw response t={Temperature}: {Answer}",
-            _settings.JSONValidatorTemperature, answer);
+            _settings.Value.JSONValidatorTemperature, answer);
 
         try
         {
@@ -211,7 +228,7 @@ public class LLMService : ILLMService
                     return null;
                 }
 
-                if (_settings.UseJSONValidator)
+                if (_settings.Value.UseJSONValidator)
                 {
                     _logger.LogInformation("Validated result: {Result}",
                         JsonSerializer.Serialize(result, _jsonOptions.Value));
@@ -232,8 +249,8 @@ public class LLMService : ILLMService
     {
         try
         {
-            var contextPath = Path.Combine(_settings.ContextsPath, $"{contextId}.json");
-            Directory.CreateDirectory(_settings.ContextsPath);
+            var contextPath = Path.Combine(_settings.Value.ContextsPath, $"{contextId}.json");
+            Directory.CreateDirectory(_settings.Value.ContextsPath);
 
             var contextJson = JsonSerializer.Serialize(chat.Messages, _jsonOptions.Value);
             File.WriteAllText(contextPath, contextJson);
@@ -254,14 +271,14 @@ public class LLMService : ILLMService
 
         chat.Options = new RequestOptions
         {
-            NumCtx = _settings.MaxContextSize,
-            Temperature = _settings.DialogTemperature,
+            NumCtx = _settings.Value.MaxContextSize,
+            Temperature = _settings.Value.DialogTemperature,
             RepeatPenalty = 1.5f
         };
 
         try
         {
-            var contextPath = Path.Combine(_settings.ContextsPath, $"{contextId}.json");
+            var contextPath = Path.Combine(_settings.Value.ContextsPath, $"{contextId}.json");
             if (File.Exists(contextPath))
             {
                 var contextJson = File.ReadAllText(contextPath);
@@ -271,7 +288,7 @@ public class LLMService : ILLMService
                 chat.Messages.AddRange(messages!);
 
                 _logger.LogDebug("Context loaded: {ContextId} ({Count} messages) t={Temperature}",
-                    contextId, messages!.Count, _settings.DialogTemperature);
+                    contextId, messages!.Count, _settings.Value.DialogTemperature);
             }
         }
         catch (Exception ex)
@@ -285,10 +302,10 @@ public class LLMService : ILLMService
 
     public void ClearContext(Chat chat)
     {
-        if (chat.Messages.Count > _settings.MaxContextMsgs)
+        if (chat.Messages.Count > _settings.Value.MaxContextMsgs)
         {
             var messages = chat.Messages.ToList();
-            while (messages.Count > _settings.MaxContextMsgs)
+            while (messages.Count > _settings.Value.MaxContextMsgs)
             {
                 messages.RemoveAt(1); // Keep system prompt
             }
