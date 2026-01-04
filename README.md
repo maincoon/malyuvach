@@ -1,6 +1,6 @@
 # malyuvach
 
-Telegram AI drawing & conversational bot. It combines:
+Telegram + Discord AI drawing & conversational bot. It combines:
 
 * Ollama-hosted local LLM (prompt + dialogue management)
 * ComfyUI workflow execution for image generation
@@ -13,6 +13,7 @@ Telegram AI drawing & conversational bot. It combines:
 ## ✨ Features
 
 * Group & private chat support (responds when mentioned or replied to in groups)
+* Discord support (DMs + mention/reply triggers in channels)
 * JSON based internal response contract (text + prompt + orientation)
 * Configurable system prompts (main + optional JSON validator stage)
 * Pluggable ComfyUI workflows (map node fields in config – no code changes)
@@ -101,6 +102,14 @@ Field id strings correspond to nested lookup path `<nodeId>.inputs.<property>` i
 | `BotShowRoomChannel` | Optional channel id / @name for reposting images |
 | `SkipUpdates` | If true, drains backlog once at start |
 
+### Discord Settings (`Malyuvach:Discord`)
+
+| Key | Description |
+|-----|-------------|
+| `Enabled` | Enables Discord gateway client |
+| `BotKey` | Discord bot token (use secret storage!) |
+| `BotShowRoomChannelId` | Optional channel id to repost generated images |
+
 ### STT Settings (`Malyuvach:STT`)
 
 | Key | Description | Default (code) |
@@ -158,6 +167,8 @@ All settings can be overridden via standard .NET double underscore syntax:
 
 ```bash
 export MALYUVACH__TELEGRAM__BOTKEY=123:ABC
+export MALYUVACH__DISCORD__ENABLED=true
+export MALYUVACH__DISCORD__BOTKEY=YOUR_DISCORD_TOKEN
 export MALYUVACH__LLM__MODELNAME=gemma2:latest
 export MALYUVACH__IMAGE__IMAGEITERATIONSTEPS=6
 ```
@@ -169,6 +180,10 @@ Never commit real `BotKey`. Use:
 * User secrets (during dev): `dotnet user-secrets set "Malyuvach:Telegram:BotKey" "123:ABC"`
 * Environment variables / secret managers in production.
 
+For Discord you can set:
+
+* User secrets: `dotnet user-secrets set "Malyuvach:Discord:BotKey" "YOUR_DISCORD_TOKEN"`
+
 ## 🤖 Telegram Interaction Rules
 
 Bot answers when:
@@ -178,6 +193,23 @@ Bot answers when:
 3. Your message replies to a bot message
 
 Orientation is chosen from model output; `portrait` swaps dimensions automatically.
+
+## 💬 Discord Interaction Rules
+
+Bot answers when:
+
+1. Direct messages (always)
+2. Channel message mentions the bot
+3. Your message replies to a bot message
+
+### Discord Gateway Requirements
+
+To read message text in guild channels, Discord requires the privileged **Message Content Intent**.
+
+1. Discord Developer Portal → Application → Bot → enable **MESSAGE CONTENT INTENT**
+2. Invite the bot with permissions to read/write in the target channels (at least: View Channel + Send Messages)
+
+If Message Content Intent is not enabled, the gateway may close the connection with `4014: Disallowed intent(s)`.
 
 ## 🧠 System Prompts
 
@@ -199,6 +231,8 @@ Provide a workflow JSON exported from ComfyUI. Identify nodes & fields to patch 
 3. Set `STT` section (or leave default to disable gracefully).
 
 Audio voice messages (Opus OGG) are converted to WAV in‑memory and streamed into Whisper.Net.
+
+Discord note: Discord voice messages arrive as audio attachments (commonly `audio/ogg`). When a message has no text content, the bot will try to transcribe `.ogg/.opus` attachments and then process the transcription as if it was typed text.
 
 ## 🪵 Logging
 
