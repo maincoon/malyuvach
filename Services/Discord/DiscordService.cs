@@ -3,6 +3,7 @@ using Discord.WebSocket;
 using Malyuvach.Configuration;
 using Malyuvach.Services.Image;
 using Malyuvach.Services.LLM;
+using Malyuvach.Services.STT;
 using Microsoft.Extensions.Options;
 
 namespace Malyuvach.Services.Discord;
@@ -13,6 +14,8 @@ public class DiscordService : IDiscordService
     private readonly DiscordSettings _settings;
     private readonly ILLMService _llmService;
     private readonly IImageService _imageService;
+    private readonly ISTTService _sttService;
+    private readonly HttpClient _httpClient;
 
     private readonly DiscordSocketClient _client;
     private readonly Random _random = new();
@@ -21,12 +24,16 @@ public class DiscordService : IDiscordService
         ILogger<DiscordService> logger,
         IOptions<DiscordSettings> settings,
         ILLMService llmService,
-        IImageService imageService)
+        IImageService imageService,
+        ISTTService sttService,
+        HttpClient httpClient)
     {
         _logger = logger;
         _settings = settings.Value;
         _llmService = llmService;
         _imageService = imageService;
+        _sttService = sttService;
+        _httpClient = httpClient;
 
         _client = new DiscordSocketClient(new DiscordSocketConfig
         {
@@ -139,7 +146,37 @@ public class DiscordService : IDiscordService
         if (!isPrivate && !isBotMentioned && !isReplyToBot)
             return;
 
-        var content = message.Content ?? string.Empty;
+
+        var content = string.Empty;
+
+        // If message contains audio attachments, try to treat them as voice messages (Discord voice messages are attachments).
+        var transcribed = await TryTranscribeAudioAttachmentAsync(channel, message);
+        if (!string.IsNullOrWhiteSpace(transcribed))
+        {
+            // Mimic Telegram: echo transcription as a reply (without pinging anyone)
+            try
+            {
+                await channel.SendMessageAsync(
+                    transcribed,
+                    messageReference: new MessageReference(message.Id),
+                    allowedMentions: AllowedMentions.None);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Failed to send transcription reply");
+            }
+
+            content = transcribed;
+        }
+        else if (!string.IsNullOrWhiteSpace(message.Content))
+        {
+            content = message.Content;
+        }
+        else
+        {
+            // No relevant content to process
+            return;
+        }
 
         // Remove bot mention tokens from message
         content = content
@@ -254,6 +291,55 @@ public class DiscordService : IDiscordService
             {
                 // ignore secondary failures
             }
+        }
+    }
+
+    private async Task<string?> TryTranscribeAudioAttachmentAsync(IMessageChannel channel, SocketUserMessage message)
+    {
+        try
+        {
+            var attachment = message.Attachments
+                .FirstOrDefault(a =>
+                    (!string.IsNullOrWhiteSpace(a.ContentType) && a.ContentType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase)) ||
+                    a.Filename.EndsWith(".ogg", StringComparison.OrdinalIgnoreCase) ||
+                    a.Filename.EndsWith(".opus", StringComparison.OrdinalIgnoreCase));
+
+            if (attachment == null)
+                return null;
+
+            // Current STT pipeline expects Telegram-style OGG/Opus.
+            // Discord voice messages commonly come as audio/ogg; we support that shape.
+            if (!(attachment.Filename.EndsWith(".ogg", StringComparison.OrdinalIgnoreCase) ||
+                  attachment.Filename.EndsWith(".opus", StringComparison.OrdinalIgnoreCase)))
+            {
+                _logger.LogInformation("Audio attachment ignored (unsupported format): {Filename} ({ContentType})",
+                    attachment.Filename, attachment.ContentType);
+                return null;
+            }
+
+            _logger.LogInformation("INPUT: audio attachment {Filename} ({Size} bytes)", attachment.Filename, attachment.Size);
+
+            await channel.TriggerTypingAsync();
+
+            using var response = await _httpClient.GetAsync(attachment.Url, HttpCompletionOption.ResponseHeadersRead);
+            response.EnsureSuccessStatusCode();
+
+            await using var remoteStream = await response.Content.ReadAsStreamAsync();
+            using var audioStream = new MemoryStream();
+            await remoteStream.CopyToAsync(audioStream);
+            audioStream.Position = 0;
+
+            var text = await _sttService.TranscribeAsync(audioStream, CancellationToken.None);
+            if (string.IsNullOrWhiteSpace(text))
+                return null;
+
+            _logger.LogInformation("Audio transcribed successfully: {Text}", text);
+            return text.Trim();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error processing Discord audio attachment");
+            return null;
         }
     }
 
