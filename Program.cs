@@ -2,6 +2,7 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using Malyuvach.Configuration;
 using Malyuvach.Services;
+using Malyuvach.Services.Discord;
 using Malyuvach.Services.Image;
 using Malyuvach.Services.LLM;
 using Malyuvach.Services.STT;
@@ -40,9 +41,11 @@ var host = Host.CreateDefaultBuilder(args)
         services.AddSingleton<IImageService, ImageService>();
         services.AddSingleton<ISTTService, STTService>();
         services.AddSingleton<ITelegramService, TelegramService>();
+        services.AddSingleton<IDiscordService, DiscordService>();
 
         // Configure hosted service
         services.AddHostedService<BotWorker>();
+        services.AddHostedService<DiscordWorker>();
     })
     .Build();
 

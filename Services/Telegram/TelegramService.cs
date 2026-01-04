@@ -37,6 +37,12 @@ public class TelegramService : ITelegramService
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
+        if (!_settings.Enabled)
+        {
+            _logger.LogInformation("Telegram is disabled (Malyuvach:Telegram:Enabled=false)");
+            return;
+        }
+
         if (_settings.SkipUpdates)
         {
             // Drain and acknowledge all pending updates so bot doesn't process historical messages
