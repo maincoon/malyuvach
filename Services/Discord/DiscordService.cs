@@ -1,10 +1,13 @@
 using Discord;
+using Discord.Net;
 using Discord.WebSocket;
 using Malyuvach.Configuration;
 using Malyuvach.Services.Image;
 using Malyuvach.Services.LLM;
 using Malyuvach.Services.STT;
 using Microsoft.Extensions.Options;
+using System.Net;
+using System.Threading.Channels;
 
 namespace Malyuvach.Services.Discord;
 
@@ -19,6 +22,23 @@ public class DiscordService : IDiscordService
 
     private readonly DiscordSocketClient _client;
     private readonly Random _random = new();
+
+    private readonly Channel<WorkItem> _workQueue = Channel.CreateBounded<WorkItem>(new BoundedChannelOptions(200)
+    {
+        SingleReader = true,
+        SingleWriter = false,
+        FullMode = BoundedChannelFullMode.DropOldest
+    });
+
+    private CancellationTokenSource? _processingCts;
+    private Task? _processingTask;
+
+    private static readonly TimeSpan[] SendRetryDelays =
+    [
+        TimeSpan.FromMilliseconds(300),
+        TimeSpan.FromSeconds(2),
+        TimeSpan.FromSeconds(5)
+    ];
 
     public DiscordService(
         ILogger<DiscordService> logger,
@@ -64,6 +84,10 @@ public class DiscordService : IDiscordService
         await _client.LoginAsync(TokenType.Bot, _settings.BotKey);
         await _client.StartAsync();
 
+        // Process messages off the gateway thread to avoid heartbeat timeouts.
+        _processingCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        _processingTask = Task.Run(() => ProcessQueueAsync(_processingCts.Token), _processingCts.Token);
+
         _logger.LogInformation("Discord bot started");
     }
 
@@ -74,6 +98,30 @@ public class DiscordService : IDiscordService
 
         try
         {
+            if (_processingCts != null)
+            {
+                _processingCts.Cancel();
+                if (_processingTask != null)
+                {
+                    try
+                    {
+                        await _processingTask;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // expected on shutdown
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Error stopping Discord processing task");
+                    }
+                }
+
+                _processingCts.Dispose();
+                _processingCts = null;
+                _processingTask = null;
+            }
+
             await _client.StopAsync();
             await _client.LogoutAsync();
         }
@@ -104,36 +152,106 @@ public class DiscordService : IDiscordService
         return Task.CompletedTask;
     }
 
-    private async Task OnMessageReceivedAsync(SocketMessage rawMessage)
+    private Task OnMessageReceivedAsync(SocketMessage rawMessage)
     {
         if (!_settings.Enabled)
-            return;
+            return Task.CompletedTask;
 
         if (rawMessage is not SocketUserMessage message)
-            return;
+            return Task.CompletedTask;
 
         if (message.Author.IsBot)
-            return;
+            return Task.CompletedTask;
 
         // Ignore system / non-user channels
         if (message.Channel is not IMessageChannel channel)
-            return;
+            return Task.CompletedTask;
 
         var isPrivate = message.Channel is IDMChannel;
 
-        // Trigger rules: private always; in guild channels only if mentioned or replied-to-bot
+        // Trigger rules: private always; in guild channels only if mentioned or replied-to-bot.
+        // IMPORTANT: do not block the gateway thread (no LLM/image/STT here).
         var currentUser = _client.CurrentUser;
         if (currentUser == null)
-            return;
+            return Task.CompletedTask;
 
         var isBotMentioned = message.MentionedUsers.Any(u => u.Id == currentUser.Id);
 
-        var isReplyToBot = false;
-        if (message.Reference?.MessageId.IsSpecified == true)
+        var referencedMessageId = message.Reference?.MessageId.IsSpecified == true
+            ? message.Reference!.MessageId.Value
+            : (ulong?)null;
+
+        // Fast pre-filter: if it's neither DM nor mention nor reply (reference present), ignore.
+        if (!isPrivate && !isBotMentioned && referencedMessageId == null)
+            return Task.CompletedTask;
+
+        var attachments = message.Attachments
+            .Select(a => new AttachmentInfo(a.Url, a.Filename, a.ContentType, a.Size))
+            .ToList();
+
+        var work = new WorkItem(
+            ChannelId: channel.Id,
+            MessageId: message.Id,
+            AuthorId: message.Author.Id,
+            AuthorUsername: message.Author.Username,
+            IsPrivate: isPrivate,
+            IsBotMentioned: isBotMentioned,
+            ReferencedMessageId: referencedMessageId,
+            Content: message.Content,
+            Attachments: attachments);
+
+        if (!_workQueue.Writer.TryWrite(work))
+        {
+            _logger.LogWarning("Discord work queue full; dropped message {MessageId} in channel {ChannelId}",
+                message.Id, channel.Id);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private async Task ProcessQueueAsync(CancellationToken cancellationToken)
+    {
+        await foreach (var work in _workQueue.Reader.ReadAllAsync(cancellationToken))
         {
             try
             {
-                var referenced = await channel.GetMessageAsync(message.Reference.MessageId.Value);
+                await ProcessWorkItemAsync(work, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Unhandled error while processing Discord work item");
+            }
+        }
+    }
+
+    private async Task ProcessWorkItemAsync(WorkItem work, CancellationToken cancellationToken)
+    {
+        var currentUser = _client.CurrentUser;
+        if (currentUser == null)
+        {
+            _logger.LogWarning("Discord current user is null; cannot process messages");
+            return;
+        }
+
+        var channel = await ResolveMessageChannelAsync(work, cancellationToken);
+        if (channel == null)
+        {
+            _logger.LogWarning("Discord channel {ChannelId} not found; cannot process message {MessageId} (IsPrivate={IsPrivate})",
+                work.ChannelId, work.MessageId, work.IsPrivate);
+            return;
+        }
+
+        // Resolve reply-to-bot if needed. We only enqueue messages that are DM/mentioned/or have a reference.
+        var isReplyToBot = false;
+        if (!work.IsPrivate && !work.IsBotMentioned && work.ReferencedMessageId.HasValue)
+        {
+            try
+            {
+                var referenced = await channel.GetMessageAsync(work.ReferencedMessageId.Value);
                 if (referenced?.Author?.Id == currentUser.Id)
                     isReplyToBot = true;
             }
@@ -141,40 +259,41 @@ public class DiscordService : IDiscordService
             {
                 _logger.LogDebug(ex, "Failed to resolve referenced message for reply detection");
             }
+
+            if (!isReplyToBot)
+            {
+                _logger.LogInformation("Ignoring Discord message {MessageId} in channel {ChannelId} as it is not a DM, mention, or reply to bot",
+                    work.MessageId, work.ChannelId);
+                return;
+            }
         }
-
-        if (!isPrivate && !isBotMentioned && !isReplyToBot)
-            return;
-
 
         var content = string.Empty;
 
         // If message contains audio attachments, try to treat them as voice messages (Discord voice messages are attachments).
-        var transcribed = await TryTranscribeAudioAttachmentAsync(channel, message);
+        var transcribed = await TryTranscribeAudioAttachmentAsync(channel, work.Attachments, cancellationToken);
         if (!string.IsNullOrWhiteSpace(transcribed))
         {
             // Mimic Telegram: echo transcription as a reply (without pinging anyone)
-            try
-            {
-                await channel.SendMessageAsync(
+            await TrySendAsync(
+                () => channel.SendMessageAsync(
                     transcribed,
-                    messageReference: new MessageReference(message.Id),
-                    allowedMentions: AllowedMentions.None);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogDebug(ex, "Failed to send transcription reply");
-            }
+                    messageReference: new MessageReference(work.MessageId),
+                    allowedMentions: AllowedMentions.None),
+                "Send transcription reply",
+                cancellationToken);
 
             content = transcribed;
         }
-        else if (!string.IsNullOrWhiteSpace(message.Content))
+        else if (!string.IsNullOrWhiteSpace(work.Content))
         {
-            content = message.Content;
+            content = work.Content;
         }
         else
         {
             // No relevant content to process
+            _logger.LogInformation("Discord message {MessageId} in channel {ChannelId} has no content or transcribable audio; ignoring",
+                work.MessageId, work.ChannelId);
             return;
         }
 
@@ -187,22 +306,22 @@ public class DiscordService : IDiscordService
         if (string.IsNullOrWhiteSpace(content))
             return;
 
-        var contextId = $"discord:{message.Channel.Id}";
+        var contextId = $"discord:{work.ChannelId}";
 
         try
         {
-            if (isPrivate)
+            if (work.IsPrivate)
             {
                 _logger.LogInformation("INPUT: private {Username}({UserId}): {Message}",
-                    message.Author.Username,
-                    message.Author.Id,
+                    work.AuthorUsername,
+                    work.AuthorId,
                     content);
             }
-            else if (message.Channel is SocketGuildChannel guildChannel)
+            else if (channel is SocketGuildChannel guildChannel)
             {
                 _logger.LogInformation("INPUT: group {Username}({UserId})@{Guild}/{Channel}({ChannelId}): {Message}",
-                    message.Author.Username,
-                    message.Author.Id,
+                    work.AuthorUsername,
+                    work.AuthorId,
                     guildChannel.Guild.Name,
                     guildChannel.Name,
                     guildChannel.Id,
@@ -211,18 +330,23 @@ public class DiscordService : IDiscordService
             else
             {
                 _logger.LogInformation("INPUT: group {Username}({UserId})@{ChannelId}: {Message}",
-                    message.Author.Username,
-                    message.Author.Id,
-                    message.Channel.Id,
+                    work.AuthorUsername,
+                    work.AuthorId,
+                    work.ChannelId,
                     content);
             }
 
-            await channel.TriggerTypingAsync();
+            await TrySendAsync(() => channel.TriggerTypingAsync(), "Trigger typing", cancellationToken);
 
-            var answer = await _llmService.GetAnswerAsync(content, contextId, CancellationToken.None);
+            var answer = await _llmService.GetAnswerAsync(content, contextId, cancellationToken);
             if (answer == null)
             {
-                await channel.SendMessageAsync("Sorry, I couldn't process your request. Please try again.");
+                await TrySendAsync(
+                    () => channel.SendMessageAsync(
+                        "Sorry, I couldn't process your request. Please try again.",
+                        allowedMentions: AllowedMentions.None),
+                    "Send error message",
+                    cancellationToken);
                 return;
             }
 
@@ -230,8 +354,14 @@ public class DiscordService : IDiscordService
                 (string.IsNullOrEmpty(answer.prompt) || answer.prompt.Length < 10))
             {
                 var text = TrimDiscordText(answer.text);
-                _logger.LogInformation("OUTPUT: {Where} -> {Message}", isPrivate ? "private" : "group", text);
-                await channel.SendMessageAsync(text, messageReference: new MessageReference(message.Id));
+                _logger.LogInformation("OUTPUT: {Where} -> {Message}", work.IsPrivate ? "private" : "group", text);
+                await TrySendAsync(
+                    () => channel.SendMessageAsync(
+                        text,
+                        messageReference: new MessageReference(work.MessageId),
+                        allowedMentions: AllowedMentions.None),
+                    "Send text reply",
+                    cancellationToken);
                 return;
             }
 
@@ -247,20 +377,30 @@ public class DiscordService : IDiscordService
                 if (imageData == null)
                 {
                     var fallback = TrimDiscordText(answer.text ?? "Sorry, I couldn't generate an image. Please try again.");
-                    _logger.LogInformation("OUTPUT: {Where} -> {Message}", isPrivate ? "private" : "group", fallback);
-                    await channel.SendMessageAsync(fallback, messageReference: new MessageReference(message.Id));
+                    _logger.LogInformation("OUTPUT: {Where} -> {Message}", work.IsPrivate ? "private" : "group", fallback);
+                    await TrySendAsync(
+                        () => channel.SendMessageAsync(
+                            fallback,
+                            messageReference: new MessageReference(work.MessageId),
+                            allowedMentions: AllowedMentions.None),
+                        "Send image-fallback reply",
+                        cancellationToken);
                     return;
                 }
 
                 var caption = TrimDiscordText(answer.text ?? answer.prompt);
-                _logger.LogInformation("OUTPUT: {Where} -> [IMAGE] {Caption}", isPrivate ? "private" : "group", caption);
+                _logger.LogInformation("OUTPUT: {Where} -> [IMAGE] {Caption}", work.IsPrivate ? "private" : "group", caption);
 
                 await using var imageStream = new MemoryStream(imageData);
-                await channel.SendFileAsync(
-                    imageStream,
-                    "malyuvach.png",
-                    caption,
-                    messageReference: new MessageReference(message.Id));
+                await TrySendAsync(
+                    () => channel.SendFileAsync(
+                        imageStream,
+                        "malyuvach.png",
+                        caption,
+                        messageReference: new MessageReference(work.MessageId),
+                        allowedMentions: AllowedMentions.None),
+                    "Send image reply",
+                    cancellationToken);
 
                 if (_settings.BotShowRoomChannelId != 0)
                 {
@@ -270,7 +410,14 @@ public class DiscordService : IDiscordService
                         if (showroom != null)
                         {
                             await using var showroomStream = new MemoryStream(imageData);
-                            await showroom.SendFileAsync(showroomStream, "malyuvach.png", TrimDiscordText(answer.prompt));
+                            await TrySendAsync(
+                                () => showroom.SendFileAsync(
+                                    showroomStream,
+                                    "malyuvach.png",
+                                    TrimDiscordText(answer.prompt),
+                                    allowedMentions: AllowedMentions.None),
+                                "Send image to showroom",
+                                cancellationToken);
                         }
                     }
                     catch (Exception ex)
@@ -283,22 +430,57 @@ public class DiscordService : IDiscordService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error processing Discord message");
-            try
-            {
-                await channel.SendMessageAsync("Ой якесь лишенько трапилось...", messageReference: new MessageReference(message.Id));
-            }
-            catch
-            {
-                // ignore secondary failures
-            }
+            await TrySendAsync(
+                () => channel.SendMessageAsync(
+                    "Ой якесь лишенько трапилось...",
+                    messageReference: new MessageReference(work.MessageId),
+                    allowedMentions: AllowedMentions.None),
+                "Send fallback error reply",
+                cancellationToken);
         }
     }
 
-    private async Task<string?> TryTranscribeAudioAttachmentAsync(IMessageChannel channel, SocketUserMessage message)
+    private async Task<IMessageChannel?> ResolveMessageChannelAsync(WorkItem work, CancellationToken cancellationToken)
+    {
+        // 1) Socket cache (works for guild channels reliably)
+        if (_client.GetChannel(work.ChannelId) is IMessageChannel cached)
+            return cached;
+
+        // 2) REST fallback (works when socket cache doesn't have it, e.g. some DM channels)
+        try
+        {
+            var restChannel = await _client.Rest.GetChannelAsync(work.ChannelId);
+            if (restChannel is IMessageChannel restMessageChannel)
+                return restMessageChannel;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to resolve channel {ChannelId} via REST", work.ChannelId);
+        }
+
+        // 3) DM fallback: open/create DM with the author
+        if (work.IsPrivate)
+        {
+            try
+            {
+                var user = await _client.Rest.GetUserAsync(work.AuthorId);
+                var dm = await user.CreateDMChannelAsync();
+                return dm;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Failed to create DM channel for user {UserId}", work.AuthorId);
+            }
+        }
+
+        return null;
+    }
+
+    private async Task<string?> TryTranscribeAudioAttachmentAsync(IMessageChannel channel, IReadOnlyList<AttachmentInfo> attachments, CancellationToken cancellationToken)
     {
         try
         {
-            var attachment = message.Attachments
+            var attachment = attachments
                 .FirstOrDefault(a =>
                     (!string.IsNullOrWhiteSpace(a.ContentType) && a.ContentType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase)) ||
                     a.Filename.EndsWith(".ogg", StringComparison.OrdinalIgnoreCase) ||
@@ -319,17 +501,17 @@ public class DiscordService : IDiscordService
 
             _logger.LogInformation("INPUT: audio attachment {Filename} ({Size} bytes)", attachment.Filename, attachment.Size);
 
-            await channel.TriggerTypingAsync();
+            await TrySendAsync(() => channel.TriggerTypingAsync(), "Trigger typing (audio)", cancellationToken);
 
-            using var response = await _httpClient.GetAsync(attachment.Url, HttpCompletionOption.ResponseHeadersRead);
+            using var response = await _httpClient.GetAsync(attachment.Url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
             response.EnsureSuccessStatusCode();
 
-            await using var remoteStream = await response.Content.ReadAsStreamAsync();
+            await using var remoteStream = await response.Content.ReadAsStreamAsync(cancellationToken);
             using var audioStream = new MemoryStream();
-            await remoteStream.CopyToAsync(audioStream);
+            await remoteStream.CopyToAsync(audioStream, cancellationToken);
             audioStream.Position = 0;
 
-            var text = await _sttService.TranscribeAsync(audioStream, CancellationToken.None);
+            var text = await _sttService.TranscribeAsync(audioStream, cancellationToken);
             if (string.IsNullOrWhiteSpace(text))
                 return null;
 
@@ -341,6 +523,93 @@ public class DiscordService : IDiscordService
             _logger.LogError(ex, "Error processing Discord audio attachment");
             return null;
         }
+    }
+
+    private async Task<bool> TrySendAsync(Func<Task> operation, string operationName, CancellationToken cancellationToken = default)
+    {
+        for (var attempt = 0; attempt < SendRetryDelays.Length; attempt++)
+        {
+            try
+            {
+                await operation();
+                return true;
+            }
+            catch (RateLimitedException ex) when (attempt < SendRetryDelays.Length - 1)
+            {
+                var delay = SendRetryDelays[attempt] + Jitter();
+                _logger.LogWarning(ex, "Discord rate limited during {Operation}. Retrying in {DelayMs}ms",
+                    operationName, (int)delay.TotalMilliseconds);
+                await Task.Delay(delay, cancellationToken);
+            }
+            catch (HttpException ex) when (attempt < SendRetryDelays.Length - 1 && IsTransient(ex))
+            {
+                var delay = SendRetryDelays[attempt] + Jitter();
+                _logger.LogWarning(ex,
+                    "Discord HTTP error during {Operation} (HTTP {Status}, DiscordCode {DiscordCode}). Retrying in {DelayMs}ms",
+                    operationName,
+                    ex.HttpCode,
+                    ex.DiscordCode,
+                    (int)delay.TotalMilliseconds);
+                await Task.Delay(delay, cancellationToken);
+            }
+            catch (TaskCanceledException ex) when (attempt < SendRetryDelays.Length - 1)
+            {
+                var delay = SendRetryDelays[attempt] + Jitter();
+                _logger.LogWarning(ex, "Discord send timeout/cancel during {Operation}. Retrying in {DelayMs}ms",
+                    operationName, (int)delay.TotalMilliseconds);
+                await Task.Delay(delay, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                if (ex is HttpException httpEx)
+                {
+                    // Non-transient cases: missing permissions, bad channel, etc.
+                    _logger.LogError(httpEx,
+                        "Discord send failed during {Operation} (HTTP {Status}, DiscordCode {DiscordCode}). No retry.",
+                        operationName,
+                        httpEx.HttpCode,
+                        httpEx.DiscordCode);
+                }
+                else
+                {
+                    _logger.LogError(ex, "Discord send failed during {Operation}. No retry.", operationName);
+                }
+
+                return false;
+            }
+        }
+
+        _logger.LogError("Discord send failed during {Operation} after {Attempts} attempts", operationName, SendRetryDelays.Length);
+        return false;
+    }
+
+    private sealed record AttachmentInfo(string Url, string Filename, string? ContentType, int Size);
+
+    private sealed record WorkItem(
+        ulong ChannelId,
+        ulong MessageId,
+        ulong AuthorId,
+        string AuthorUsername,
+        bool IsPrivate,
+        bool IsBotMentioned,
+        ulong? ReferencedMessageId,
+        string? Content,
+        IReadOnlyList<AttachmentInfo> Attachments);
+
+    private static bool IsTransient(HttpException ex)
+    {
+        return ex.HttpCode == HttpStatusCode.RequestTimeout ||
+               ex.HttpCode == HttpStatusCode.TooManyRequests ||
+               ex.HttpCode == HttpStatusCode.BadGateway ||
+               ex.HttpCode == HttpStatusCode.ServiceUnavailable ||
+               ex.HttpCode == HttpStatusCode.GatewayTimeout ||
+               ex.HttpCode == HttpStatusCode.InternalServerError;
+    }
+
+    private TimeSpan Jitter()
+    {
+        // small random jitter to avoid thundering herd on retries
+        return TimeSpan.FromMilliseconds(_random.Next(0, 250));
     }
 
     private static string TrimDiscordText(string text)
